@@ -1,0 +1,16 @@
+aiohttp==3.12.14
+beautifulsoup4==4.13.4
+faiss==1.9.0
+fastapi==0.116.1
+langchain==0.3.27
+langchain_community==0.3.27
+langchain_core==0.3.72
+langchain_openai==0.3.28
+newspaper3k==0.2.8
+numpy==2.3.2
+pydantic==2.11.7
+python-dotenv==1.1.1
+Requests==2.32.4
+scikit_learn==1.7.1
+selenium==4.34.2
+youtube_transcript_api==1.2.1
