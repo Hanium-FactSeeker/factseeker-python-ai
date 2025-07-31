@@ -1,5 +1,15 @@
+# Python 캐시/컴파일 파일
 __pycache__/
 *.pyc
+*.pyo
+
+# 환경 변수
 .env
+
+# 로컬 벡터/캐시 디렉토리
 article_faiss_cache/
 feature_faiss_db_openai/
+
+# OS/IDE/에디터 불필요 파일
+.DS_Store
+.vscode/
