@@ -13,9 +13,6 @@ from selenium.webdriver.chrome.options import Options
 import time
 import logging
 
-# 환경 변수 로드
-from dotenv import load_dotenv
-load_dotenv()
 
 # Google API Key 및 CSE ID는 main.py에서 로드되므로, 여기서 직접 참조하지 않습니다.
 # 대신, 필요한 경우 함수 인자로 받거나 전역 설정 객체로 관리할 수 있습니다.
@@ -33,7 +30,7 @@ async def fetch_youtube_transcript(video_id):
         transcript = YouTubeTranscriptApi().fetch(video_id, languages=["ko"])
         return " ".join([t.text for t in transcript])
     except Exception as e:
-        logging.exception(f"❌ 자막 추출 실패: {e}")
+        logging.exception(f"자막 추출 실패: {e}")
         return ""
 
 def extract_chosun_with_selenium(url):
@@ -59,6 +56,7 @@ def extract_chosun_with_selenium(url):
 
     driver = None
     try:
+        
         driver = webdriver.Chrome(options=options) # PATH에 chromedriver가 있다고 가정
         logging.info(f"🌐 Selenium으로 URL 접속 시도: {url}")
         driver.get(url)
@@ -216,6 +214,7 @@ def clean_news_title(title):
     return cleaned_title
 
 async def search_news_google_cs(query):
+    logging.info(f"Google CSE로 뉴스 검색: {query}")
     """Google Custom Search API를 사용하여 뉴스를 검색합니다."""
     google_api_key = os.getenv("GOOGLE_API_KEY")
     google_cse_id = os.getenv("GOOGLE_CSE_ID")

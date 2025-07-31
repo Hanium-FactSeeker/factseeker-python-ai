@@ -3,9 +3,6 @@ import re
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 
-# 환경 변수 로드
-from dotenv import load_dotenv
-load_dotenv()
 
 def get_chat_llm():
     """LangChain용 ChatOpenAI 모델을 초기화합니다."""

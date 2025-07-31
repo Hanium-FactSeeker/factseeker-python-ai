@@ -5,7 +5,6 @@ import faiss
 from langchain.docstore.document import Document
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
 # 서비스 로직 임포트
 from services.fact_checker import run_fact_check
@@ -19,9 +18,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
-
-# .env 파일 로드 (FastAPI 앱 시작 시 한 번만)
-load_dotenv()
 
 app = FastAPI(
     title="YouTube Fact-Checker API",
@@ -51,6 +47,7 @@ async def perform_fact_check(request: FactCheckRequest):
     """
     logging.info(f"--- 팩트체크 요청 수신: {request.youtube_url} ---")
     try:
+        logging.info("팩트체크 시작...")
         result = await run_fact_check(request.youtube_url)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])

@@ -8,14 +8,11 @@ from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.docstore.document import Document
 
-# 환경 변수 로드
-from dotenv import load_dotenv
-load_dotenv()
 
 # FAISS 벡터 DB 및 캐시 경로
 # 로컬 테스트용 경로, 배포 시 S3 경로로 변경 예정
-FAISS_DB_PATH = "feature_faiss_db_openai"
-CHUNK_CACHE_DIR = "article_faiss_cache"
+FAISS_DB_PATH   = os.getenv("LOCAL_FAISS_DB_PATH", "feature_faiss_db_openai")
+CHUNK_CACHE_DIR = os.getenv("LOCAL_CHUNK_CACHE_DIR", "article_faiss_cache")
 
 def split_text(text, chunk_size=1000, chunk_overlap=100):
     """텍스트를 지정된 크기로 분할합니다."""
@@ -39,7 +36,7 @@ async def get_or_build_faiss(url, article_text=None, embed_model=None, cache_dir
         all_docs = list(db.docstore._dict.values())
         retrieved_text = "\n".join([doc.page_content for doc in all_docs])
                 
-        logging.info(f"✅ 캐시에서 본문 텍스트 복원 완료 (길이: {len(retrieved_text)}자).")
+        logging.info(f"캐시에서 본문 텍스트 복원 완료 (길이: {len(retrieved_text)}자).")
         return db, retrieved_text # DB와 복원된 텍스트 반환
     
     if article_text is None:

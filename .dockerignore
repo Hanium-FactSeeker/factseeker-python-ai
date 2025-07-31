@@ -1,0 +1,6 @@
+.git
+__pycache__
+*.pyc
+.env
+article_faiss_cache/
+feature_faiss_db_openai/
