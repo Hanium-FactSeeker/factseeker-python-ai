@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 *.pyo
+*.f
+*.pk
 
 # 환경 변수
 .env
@@ -13,3 +15,6 @@ feature_faiss_db_openai/
 # OS/IDE/에디터 불필요 파일
 .DS_Store
 .vscode/
+
+
+
