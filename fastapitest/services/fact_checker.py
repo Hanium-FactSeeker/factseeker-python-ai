@@ -112,7 +112,10 @@ async def run_fact_check(youtube_url):
         
         # 2. 유사하거나 중복되는 주장 제거
         reducer = build_reduce_similar_claims_chain()
-        reduced_result = await reducer.ainvoke({"claims": claims})
+        # claims_from_llm을 JSON 형식으로 변환하여 claims_json 변수에 할당
+        claims_json = json.dumps(claims, ensure_ascii=False, indent=2)
+        reduced_result = await reducer.ainvoke({"claims_json": claims_json})
+        
         # LangChain AIMessage 객체에서 content 속성을 사용하도록 수정
         claims_to_check = [
             line.strip() for line in reduced_result.content.strip().split('\n')
