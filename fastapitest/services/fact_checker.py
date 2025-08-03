@@ -35,9 +35,10 @@ from core.faiss_manager import get_or_build_faiss, CHUNK_CACHE_DIR
 MAX_CLAIMS_TO_FACT_CHECK = 10
 embed_model = OpenAIEmbeddings(model="text-embedding-3-small", request_timeout=60, max_retries=5, chunk_size=500)
 
+
 async def run_fact_check(youtube_url: str):
     """
-    주어진 유튜브 URL에 대해 팩트체크를 수행합니다.
+    주어진 유튜브 URL에 대한 팩트체크 프로세스를 실행합니다.
     """
     video_id = extract_video_id(youtube_url)
     if not video_id:
@@ -74,9 +75,7 @@ async def run_fact_check(youtube_url: str):
     reduced_claims_content = await reduce_claims_chain.ainvoke({"claims": extracted_claims})
     
     try:
-        # JSON 문자열을 파이썬 리스트로 파싱
         claims_to_check = json.loads(reduced_claims_content.content)
-        # 최대 10개까지만 처리
         claims_to_check = claims_to_check[:MAX_CLAIMS_TO_FACT_CHECK]
     except json.JSONDecodeError as e:
         logging.error(f"JSON 파싱 오류: {e}")
@@ -86,20 +85,19 @@ async def run_fact_check(youtube_url: str):
 
     # 4. 각 주장에 대한 팩트체크 실행
     fact_check_chain = build_factcheck_chain()
-    # 사용자 요청에 따라 build_claim_summarizer의 역할을 검색어 생성으로 변경
     search_query_chain = build_claim_summarizer()
 
     async def process_claim_step(claim_with_idx):
         idx, claim = claim_with_idx
         logging.info(f"--- 팩트체크 시작: ({idx+1}/{len(claims_to_check)}) '{claim}'")
         
-        # 주장을 검색 키워드로 변환
+        # 주장을 검색 키워드로 변환 (사용자 정의 체인 사용)
         search_query_result = await search_query_chain.ainvoke({"claim": claim})
         search_query = search_query_result.content
         logging.info(f"--- 뉴스 검색 키워드 생성: '{claim}' -> '{search_query}'")
         
         # 뉴스 검색
-        news_urls = await search_news_google_cs(search_query) # 변환된 키워드 사용
+        news_urls = await search_news_google_cs(search_query)
         if not news_urls:
             logging.info(f"근거를 찾지 못함: '{claim}'")
             return {
@@ -109,49 +107,50 @@ async def run_fact_check(youtube_url: str):
                 "evidence": []
             }
         
-        # 기사 내용 추출 및 FAISS DB 구축
         validated_evidence = []
-        for news_url in news_urls:
+        unique_urls = set()
+        for news_item in news_urls:
+            url = news_item.get("link")
+            if not url or url in unique_urls:
+                continue
+            unique_urls.add(url)
+
             try:
-                article_text = await get_article_text(news_url)
+                article_text = await get_article_text(url)
                 if not article_text or len(article_text) < 100:
                     continue
 
-                faiss_db, _ = await get_or_build_faiss(url=news_url, article_text=article_text, embed_model=embed_model)
+                faiss_db, _ = await get_or_build_faiss(url=url, article_text=article_text, embed_model=embed_model)
 
-                # 주장과 관련된 문서 검색
                 docs = faiss_db.similarity_search(query=claim, k=3)
                 context = " ".join([doc.page_content for doc in docs])
 
                 if not context:
                     continue
 
-                # LLM을 사용해 관련성 및 사실 여부 판단
                 fact_check_result = await fact_check_chain.ainvoke({
                     "claim": claim,
                     "context": context
                 })
 
-                # LLM의 JSON 응답 파싱
+                # LLM의 JSON 응답을 올바르게 파싱
                 parsed_result = json.loads(fact_check_result.content.strip())
                 is_relevant = parsed_result.get("관련성") == "예"
                 is_fact_match = parsed_result.get("사실 설명") == "예"
 
                 if is_relevant and is_fact_match:
-                    # 사용자 요청에 따라 요약 기능은 제거됨
                     validated_evidence.append({
-                        "url": news_url,
-                        "source_title": clean_news_title(news_url)
+                        "url": url,
+                        "source_title": clean_news_title(url),
+                        # 요약 로직은 삭제하고, 추후 필요시 추가
                     })
-                    # 충분한 근거를 찾으면 다음 클레임으로
                     if len(validated_evidence) >= 3:
                         break
 
             except Exception as e:
-                logging.error(f"기사 처리 중 오류 발생 ({news_url}): {e}")
+                logging.error(f"기사 처리 중 오류 발생 ({url}): {e}")
                 continue
         
-        # 팩트체크 결과 및 신뢰도 계산
         confidence_score = 0
         if validated_evidence:
             confidence_score = calculate_fact_check_confidence(validated_evidence)
@@ -173,17 +172,17 @@ async def run_fact_check(youtube_url: str):
 
     avg_score = round(sum(o['confidence_score'] for o in outputs) / len(outputs)) if outputs else 0
     evidence_ratio = sum(1 for o in outputs if o["result"] == "likely_true") / len(outputs) if outputs else 0
-    # confidence_summary 문자열 생성 로직 변경
+    
     if len(outputs) < 3:
         summary = f"신뢰도 평가 불가 (팩트체크 주장 수 부족: {len(outputs)}개)"
     else:
-        # 백분율 포맷팅
         evidence_ratio_percent = evidence_ratio * 100
         summary = f"증거 확보된 주장 비율: {evidence_ratio_percent:.1f}%"
 
     classifier = build_channel_type_classifier()
     classification = await classifier.ainvoke({"transcript": transcript})
-    # 채널 타입과 이유를 분리하여 처리
+    
+    # LLM의 JSON 응답을 올바르게 파싱
     try:
         channel_classification_json = json.loads(classification.content)
         channel_type = channel_classification_json.get("type", "기타")
