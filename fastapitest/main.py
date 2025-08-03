@@ -8,7 +8,6 @@ from pydantic import BaseModel
 
 # 서비스 로직 임포트
 from services.fact_checker import run_fact_check
-from core.faiss_manager import FAISS_DB_PATH, CHUNK_CACHE_DIR
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from core.lambdas import clean_news_title, search_news_google_cs # 필요한 유틸리티 추가
