@@ -17,7 +17,7 @@ import time
 import logging
 
 # Whisper 관련 라이브러리 추가
-import openai
+from openai import OpenAI
 import yt_dlp
 
 # Logging setup
@@ -48,18 +48,21 @@ def extract_video_id(url: str):
 def fetch_youtube_transcript(video_url):
     """
     EC2 내부 쿠키를 사용하여 yt-dlp로 음원 다운로드 후 Whisper로 자막 추출
+    - openai 라이브러리 v1.0.0+에 맞춰 API 호출 방식 수정
     """
     video_id = extract_video_id(video_url)
     logging.info(f"[디버깅] 추출된 video_id: {video_id}")
     if not video_id:
         logging.error("유효한 YouTube URL이 아닙니다.")
         return ""
-
-    openai.api_key = os.getenv("OPENAI_API_KEY")
-    if not openai.api_key:
-        logging.error("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
-        return ""
     
+    # OpenAI v1.0.0+ API 사용
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    except Exception as e:
+        logging.error(f"OpenAI 클라이언트 초기화 오류: {e}")
+        return ""
+
     cookies_path = "/home/ubuntu/factseeker-python-ai/fastapitest/cookies.txt"
     # yt-dlp가 다운로드할 파일명을 지정합니다. 원본 오디오 파일 확장자는 yt-dlp가 자동으로 결정합니다.
     temp_audio_file_template = f"{video_id}"
@@ -87,9 +90,9 @@ def fetch_youtube_transcript(video_url):
         logging.info(f"✅ 음원 다운로드 완료: {actual_audio_file}")
 
         with open(actual_audio_file, "rb") as audio_file:
-            transcript = openai.Audio.transcribe(
-                "whisper-1",
-                audio_file,
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
                 language="ko"
             )
         logging.info("✅ Whisper API로 자막 추출 완료")
