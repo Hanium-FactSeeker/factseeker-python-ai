@@ -20,7 +20,7 @@ def extract_video_id(url):
     match = re.search(r'(?:v=|/)([0-9A-Za-z_-]{11})', url)
     return match.group(1) if match else None
 
-def transcribe_youtube_audio_with_whisper(video_url):
+def fetch_youtube_transcript(video_url):
     """
     EC2 내부 쿠키를 사용하여 yt-dlp로 음원 다운로드 후 Whisper로 자막 추출
     """
