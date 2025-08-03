@@ -27,7 +27,7 @@ def extract_video_id(url):
     return match.group(1) if match else None
 
 
-async def fetch_youtube_transcript_with_whisper(video_id):
+async def fetch_youtube_transcript(video_id):
     """
     yt-dlp와 OpenAI Whisper API를 사용하여 YouTube 비디오의 자막을 생성합니다.
     """
