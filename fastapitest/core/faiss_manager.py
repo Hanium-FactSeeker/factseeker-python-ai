@@ -1,51 +1,72 @@
 import os
+import json
 import hashlib
-import numpy as np
 import logging
-from sklearn.metrics.pairwise import cosine_similarity
-from langchain_openai import OpenAIEmbeddings
+import boto3
+import faiss
+import pickle
+from langchain.docstore.document import Document
 from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.docstore.document import Document
 
+CHUNK_CACHE_DIR = "article_faiss_cache"
+S3_BUCKET_NAME = "factseeker-faiss-db"
+S3_PREFIX = "article_faiss_cache/"
+os.makedirs(CHUNK_CACHE_DIR, exist_ok=True)
 
-# FAISS 벡터 DB 및 캐시 경로
-# 로컬 테스트용 경로, 배포 시 S3 경로로 변경 예정
-FAISS_DB_PATH   = os.getenv("LOCAL_FAISS_DB_PATH", "feature_faiss_db_openai")
-CHUNK_CACHE_DIR = os.getenv("LOCAL_CHUNK_CACHE_DIR", "article_faiss_cache")
+s3 = boto3.client("s3")
 
-def split_text(text, chunk_size=1000, chunk_overlap=100):
-    """텍스트를 지정된 크기로 분할합니다."""
-    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
-        chunk_size=chunk_size, chunk_overlap=chunk_overlap
-    )
-    return splitter.split_text(text)
+def sha256_of(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-async def get_or_build_faiss(url, article_text=None, embed_model=None, cache_dir=CHUNK_CACHE_DIR):     
-    """
-    URL 기반으로 FAISS DB를 로드하거나 새로 구축하여 저장하고,
-    FAISS DB가 로드될 경우 해당 기사의 원본 텍스트를 반환합니다.
-    """
-    idx = hashlib.md5(url.encode()).hexdigest()
-    path = os.path.join(cache_dir, idx)
-    
-    if os.path.isdir(path):
-        logging.info(f"FAISS DB 캐시 로드: {url}")
-        db = FAISS.load_local(path, embed_model, allow_dangerous_deserialization=True)
-        
-        all_docs = list(db.docstore._dict.values())
-        retrieved_text = "\n".join([doc.page_content for doc in all_docs])
-                
-        logging.info(f"캐시에서 본문 텍스트 복원 완료 (길이: {len(retrieved_text)}자).")
-        return db, retrieved_text # DB와 복원된 텍스트 반환
-    
-    if article_text is None:
-        raise ValueError("FAISS DB 캐시가 없으면 article_text가 반드시 제공되어야 합니다.")
+def download_from_s3_if_exists(s3_key: str, local_path: str) -> bool:
+    try:
+        s3.download_file(S3_BUCKET_NAME, s3_key, local_path)
+        logging.info(f"🔽 S3에서 다운로드 완료: {s3_key}")
+        return True
+    except Exception as e:
+        logging.warning(f"⚠️ S3 다운로드 실패: {s3_key} → {e}")
+        return False
 
-    os.makedirs(path, exist_ok=True)
-    chunks = split_text(article_text)
-    docs = [Document(page_content=c, metadata={"url": url}) for c in chunks]
+def upload_to_s3(local_path: str, s3_key: str):
+    try:
+        s3.upload_file(local_path, S3_BUCKET_NAME, s3_key)
+        logging.info(f"🆙 S3 업로드 완료: {s3_key}")
+    except Exception as e:
+        logging.error(f"❌ S3 업로드 실패: {s3_key} → {e}")
+
+def get_or_build_faiss(url: str, article_text: str, embed_model) -> FAISS:
+    hashed = sha256_of(url)
+    faiss_path = os.path.join(CHUNK_CACHE_DIR, f"{hashed}.faiss")
+    pkl_path = os.path.join(CHUNK_CACHE_DIR, f"{hashed}.pkl")
+    s3_faiss_key = f"{S3_PREFIX}{hashed}.faiss"
+    s3_pkl_key = f"{S3_PREFIX}{hashed}.pkl"
+
+    # ✅ 로컬에 없으면 S3에서 다운로드 시도
+    if not os.path.exists(faiss_path) or not os.path.exists(pkl_path):
+        logging.info("📦 로컬 캐시 없음 → S3에서 로딩 시도")
+        download_from_s3_if_exists(s3_faiss_key, faiss_path)
+        download_from_s3_if_exists(s3_pkl_key, pkl_path)
+
+    # ✅ 다운로드되었거나 원래부터 로컬에 있으면 로드
+    if os.path.exists(faiss_path) and os.path.exists(pkl_path):
+        logging.info("✅ FAISS 캐시 로드 완료")
+        with open(pkl_path, "rb") as f:
+            stored_texts = pickle.load(f)
+        return FAISS.load_local(faiss_path, embed_model, stored_texts)
+
+    # ❌ 둘 다 없으면 새로 생성
+    logging.info("⚙️ FAISS 인덱스 새로 생성 중...")
+    splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100)
+    chunks = splitter.split_text(article_text)
+    docs = [Document(page_content=chunk, metadata={"url": url}) for chunk in chunks]
     db = FAISS.from_documents(docs, embed_model)
-    db.save_local(path)
-    logging.info(f"FAISS DB 캐시 생성 및 저장: {url}")
-    return db, article_text # 새로 생성된 DB와 원본 텍스트 반환
+    db.save_local(faiss_path)
+    with open(pkl_path, "wb") as f:
+        pickle.dump(docs, f)
+
+    # 업로드
+    upload_to_s3(faiss_path, s3_faiss_key)
+    upload_to_s3(pkl_path, s3_pkl_key)
+
+    return db
