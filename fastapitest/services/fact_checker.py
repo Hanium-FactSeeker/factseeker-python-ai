@@ -39,7 +39,17 @@ async def search_and_retrieve_docs(claim):
     """
     주장(claim)에 대해 뉴스 검색을 수행하고, 관련성 있는 기사를 찾아 텍스트를 반환합니다.
     """
-    search_results = await search_news_google_cs(claim)
+    summarizer = build_claim_summarizer()
+    try:
+        summary_result = await summarizer.ainvoke({"claim": claim})
+        summarized_query = summary_result.content.strip()
+    except Exception as e:
+        logging.error(f"Claim 요약 실패: {e}, 원문으로 검색 진행")
+        summarized_query = claim  # fallback
+
+    logging.info(f"🔍 생성된 검색어: '{summarized_query}'")
+
+    search_results = await search_news_google_cs(summarized_query)
     
     docs = []
     retrieved_urls = set()
