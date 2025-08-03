@@ -23,7 +23,7 @@ from core.lambdas import (
 )
 from core.llm_chains import (
     build_claim_extractor,
-    build_claim_summarizer, # 사용자 요청에 따라 역할 변경됨
+    build_claim_summarizer,
     build_factcheck_chain,
     build_reduce_similar_claims_chain,
     build_channel_type_classifier,
@@ -39,7 +39,6 @@ async def search_and_retrieve_docs(claim):
     """
     주장(claim)에 대해 뉴스 검색을 수행하고, 관련성 있는 기사를 찾아 텍스트를 반환합니다.
     """
-    # 사용자의 이전 요청에서 수정된 search_and_retrieve_docs 함수를 그대로 사용
     search_results = await search_news_google_cs(claim)
     
     docs = []
@@ -101,7 +100,7 @@ async def run_fact_check(youtube_url):
 
     try:
         # 0. 유튜브 스크립트 추출
-        transcript = fetch_youtube_transcript(video_id) # 이 부분을 수정했습니다.
+        transcript = fetch_youtube_transcript(youtube_url)
         if not transcript:
             return {"error": "Failed to load transcript"}
         
@@ -218,11 +217,11 @@ async def run_fact_check(youtube_url):
                             "fact_check_result": fact_check_result.group(1).strip(),
                             "justification": justification.group(1).strip()
                         })
-                        logging.info(f"      - 근거 확보 ({i+1}): {doc.metadata.get('source_title')}")
+                        logging.info(f"    - 근거 확보 ({i+1}): {doc.metadata.get('source_title')}")
                 else:
-                    logging.warning(f"      - LLM 응답 형식 오류 ({i+1}): {result_content}")
+                    logging.warning(f"    - LLM 응답 형식 오류 ({i+1}): {result_content}")
             except Exception as e:
-                logging.error(f"      - LLM 팩트체크 체인 실행 중 오류: {e}")
+                logging.error(f"    - LLM 팩트체크 체인 실행 중 오류: {e}")
 
         # 임시 FAISS DB 삭제
         if os.path.exists(faiss_db_temp_path):
