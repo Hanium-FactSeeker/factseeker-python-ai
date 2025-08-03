@@ -7,12 +7,14 @@ import requests
 from urllib.parse import urlparse, urlunparse
 from bs4 import BeautifulSoup
 from newspaper import Article
-from youtube_transcript_api import YouTubeTranscriptApi
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 import time
 import logging
 
+# Whisper 관련 라이브러리 추가
+import openai
+import yt_dlp
 
 # Google API Key 및 CSE ID는 main.py에서 로드되므로, 여기서 직접 참조하지 않습니다.
 # 대신, 필요한 경우 함수 인자로 받거나 전역 설정 객체로 관리할 수 있습니다.
@@ -24,14 +26,69 @@ def extract_video_id(url):
     match = re.search(r'(?:v=|/)([0-9A-Za-z_-]{11})', url)
     return match.group(1) if match else None
 
-async def fetch_youtube_transcript(video_id):
-    """YouTube 비디오 ID로부터 자막을 가져옵니다."""
-    try:
-        transcript = YouTubeTranscriptApi().fetch(video_id, languages=["ko"])
-        return " ".join([t.text for t in transcript])
-    except Exception as e:
-        logging.exception(f"자막 추출 실패: {e}")
+
+async def fetch_youtube_transcript_with_whisper(video_id):
+    """
+    yt-dlp와 OpenAI Whisper API를 사용하여 YouTube 비디오의 자막을 생성합니다.
+    """
+    if not video_id:
+        logging.error("비디오 ID가 유효하지 않습니다.")
         return ""
+
+    # OpenAI API 키 설정
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+    if not openai.api_key:
+        logging.error("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
+        return ""
+
+    temp_audio_file = None
+    try:
+        # 1. yt-dlp를 사용하여 YouTube 영상의 음원 다운로드
+        audio_filename = f"{video_id}.mp3"
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': audio_filename,
+            'quiet': True,
+        }
+        
+        logging.info(f"🎶 yt-dlp로 YouTube 음원 다운로드 시작: {video_id}")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info_dict = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=True)
+        
+        temp_audio_file = audio_filename
+        logging.info(f"✅ 음원 다운로드 완료: {temp_audio_file}")
+
+        # 2. Whisper API 호출
+        with open(temp_audio_file, "rb") as audio_file:
+            transcript = openai.Audio.transcribe(
+                "whisper-1",
+                audio_file,
+                language="ko"  # 한국어 모델 지정
+            )
+        
+        logging.info("✅ Whisper API로 자막 생성 완료")
+        return transcript.text
+
+    except yt_dlp.utils.DownloadError as e:
+        logging.exception(f"yt-dlp 다운로드 실패: {e}")
+        return ""
+    except openai.error.OpenAIError as e:
+        logging.exception(f"Whisper API 호출 실패: {e}")
+        return ""
+    except Exception as e:
+        logging.exception(f"YouTube 음원 처리 중 예상치 못한 오류 발생: {e}")
+        return ""
+    finally:
+        # 3. 임시 파일 삭제
+        if temp_audio_file and os.path.exists(temp_audio_file):
+            os.remove(temp_audio_file)
+            logging.info(f"🗑️ 임시 파일 삭제 완료: {temp_audio_file}")
+
 
 def extract_chosun_with_selenium(url):
     """
@@ -42,8 +99,8 @@ def extract_chosun_with_selenium(url):
     options.add_argument("--headless")  # 브라우저 안 띄우고 실행
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu") # GPU 사용 비활성화 (일부 환경에서 필요)
-    options.add_argument("--window-size=1920,1080") # 창 크기 설정
+    options.add_argument("--disable-gpu")  # GPU 사용 비활성화 (일부 환경에서 필요)
+    options.add_argument("--window-size=1920,1080")  # 창 크기 설정
     
     # --- 중요: 로컬 환경에 맞는 ChromeDriver 경로 설정 ---
     # chromedriver_path = "/path/to/your/chromedriver" # 실제 경로로 변경
@@ -57,10 +114,10 @@ def extract_chosun_with_selenium(url):
     driver = None
     try:
         
-        driver = webdriver.Chrome(options=options) # PATH에 chromedriver가 있다고 가정
+        driver = webdriver.Chrome(options=options)  # PATH에 chromedriver가 있다고 가정
         logging.info(f"🌐 Selenium으로 URL 접속 시도: {url}")
         driver.get(url)
-        time.sleep(3)   # JS 렌더링 기다림 (충분히 기다려야 함)
+        time.sleep(3)  # JS 렌더링 기다림 (충분히 기다려야 함)
 
         soup = BeautifulSoup(driver.page_source, 'html.parser')
 
@@ -177,10 +234,10 @@ def clean_news_title(title):
     뉴스 제목에서 언론사명, 슬로건, 특수 태그, 불필요한 기호 등을 제거하여 정제합니다.
     """
     patterns_to_remove = [
-        r'대한민국 오후를 여는 유일석간 문화일보', # 문화일보 슬로건
-        r'\| 문화일보', r'문화일보', # 문화일보 관련
-        r'\| 중앙일보', r'중앙일보', # 중앙일보 관련
-        r'\| 경향신문', r'경향신문', # 경향신문 관련
+        r'대한민국 오후를 여는 유일석간 문화일보',  # 문화일보 슬로건
+        r'\| 문화일보', r'문화일보',  # 문화일보 관련
+        r'\| 중앙일보', r'중앙일보',  # 중앙일보 관련
+        r'\| 경향신문', r'경향신문',  # 경향신문 관련
         r'머니투데이', r'MBN', r'연합뉴스', r'SBS 뉴스', r'MBC 뉴스', r'KBS 뉴스',
         r'동아일보', r'조선일보', r'한겨레', r'국민일보', r'서울신문', r'세계일보',
         r'노컷뉴스', r'헤럴드경제', r'매일경제', r'한국경제', r'아시아경제',
@@ -190,15 +247,15 @@ def clean_news_title(title):
     ]
 
     patterns_to_remove_regex = [
-        r'\[.*?\]', # 예: [단독], [속보], [종합], [사진], [영상], [팩트체크]
-        r'\(.*?\)', # 예: (서울), (종합), (영상)
-        r'\{.*?\}', # 예: {뉴스초점}
-        r'<[^>]+>', # HTML 태그 잔여물
-        r'\[\s*\w+\s*\]', # 공백 포함 대괄호 태그
+        r'\[.*?\]',  # 예: [단독], [속보], [종합], [사진], [영상], [팩트체크]
+        r'\(.*?\)',  # 예: (서울), (종합), (영상)
+        r'\{.*?\}',  # 예: {뉴스초점}
+        r'<[^>]+>',  # HTML 태그 잔여물
+        r'\[\s*\w+\s*\]',  # 공백 포함 대괄호 태그
     ]
 
     symbols_to_remove = [
-        r'\|', r'\:', r'\_', r'\-', r'\+', r'=', r'/', r'\\' # |, :, _, -, +, =, /, \ 등
+        r'\|', r'\:', r'\_', r'\-', r'\+', r'=', r'/', r'\\'  # |, :, _, -, +, =, /, \ 등
     ]
 
     cleaned_title = title
@@ -297,6 +354,6 @@ def calculate_source_diversity_score(evidence):
     elif num_unique_sources == 2:
         return 3
     elif num_unique_sources == 1:
-        return 1 # 단일 출처라도 다양성 점수는 낮게 책정
+        return 1  # 단일 출처라도 다양성 점수는 낮게 책정
     else:
-        return 0 # 출처가 없거나 유효하지 않은 경우
+        return 0  # 출처가 없거나 유효하지 않은 경우
