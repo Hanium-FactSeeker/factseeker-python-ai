@@ -17,30 +17,28 @@ import openai
 import yt_dlp
 
 def extract_video_id(url):
-    """YouTube URL에서 비디오 ID를 추출합니다."""
     match = re.search(r'(?:v=|/)([0-9A-Za-z_-]{11})', url)
     return match.group(1) if match else None
 
-
-async def fetch_youtube_transcript(video_id):
+def transcribe_youtube_audio_with_whisper(video_url):
     """
-    yt-dlp와 OpenAI Whisper API를 사용하여 YouTube 비디오의 자막을 생성합니다.
-    (cookies.txt 파일 대신 yt-dlp의 oauth2 인증 방식에 의존합니다.)
+    EC2 내부 쿠키를 사용하여 yt-dlp로 음원 다운로드 후 Whisper로 자막 추출
     """
+    video_id = extract_video_id(video_url)
     if not video_id:
-        logging.error("비디오 ID가 유효하지 않습니다.")
+        logging.error("유효한 YouTube URL이 아닙니다.")
         return ""
 
-    # OpenAI API 키 설정
     openai.api_key = os.getenv("OPENAI_API_KEY")
     if not openai.api_key:
         logging.error("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
         return ""
 
-    temp_audio_file = None
+    # ✅ EC2에서 고정된 쿠키 경로 사용
+    cookies_path = "/home/ubuntu/factseeker-python-ai/fastapitest/cookies.txt"
+    temp_audio_file = f"{video_id}.mp3"
+
     try:
-        # 1. yt-dlp를 사용하여 YouTube 영상의 음원 다운로드
-        audio_filename = f"{video_id}.mp3"
         ydl_opts = {
             'format': 'bestaudio/best',
             'postprocessors': [{
@@ -48,41 +46,34 @@ async def fetch_youtube_transcript(video_id):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }],
-            'outtmpl': audio_filename,
-            # 'cookiefile' 및 'no_check_certificate' 옵션 제거
+            'outtmpl': temp_audio_file,
+            'cookiefile': cookies_path,
             'quiet': True,
         }
-        
-        logging.info(f"🎶 yt-dlp로 YouTube 음원 다운로드 시작: {video_id}")
-        
-        # 표준 YouTube URL 형식으로 변경
-        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
-        
+
+        logging.info(f"🎬 yt-dlp로 음원 다운로드 시작: {video_url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([youtube_url])
-        
-        temp_audio_file = audio_filename
+            ydl.download([video_url])
+
         logging.info(f"✅ 음원 다운로드 완료: {temp_audio_file}")
 
-        # 2. Whisper API 호출
         with open(temp_audio_file, "rb") as audio_file:
             transcript = openai.Audio.transcribe(
                 "whisper-1",
                 audio_file,
-                language="ko"  # 한국어 모델 지정
+                language="ko"
             )
-        
-        logging.info("✅ Whisper API로 자막 생성 완료")
+        logging.info("✅ Whisper API로 자막 추출 완료")
         return transcript.text
 
     except Exception as e:
-        logging.exception(f"yt-dlp 또는 Whisper 처리 중 오류 발생: {e}")
+        logging.exception(f"yt-dlp 또는 Whisper 처리 중 오류: {e}")
         return ""
     finally:
-        # 3. 임시 파일 삭제
-        if temp_audio_file and os.path.exists(temp_audio_file):
+        if os.path.exists(temp_audio_file):
             os.remove(temp_audio_file)
             logging.info(f"🗑️ 임시 파일 삭제 완료: {temp_audio_file}")
+
 
 
 def extract_chosun_with_selenium(url):
