@@ -153,7 +153,7 @@ async def run_fact_check(youtube_url: str, dedup_method: str = "llm"):
     if not video_id:
         return {"error": "Invalid YouTube URL"}
     
-    transcript = fetch_youtube_transcript(video_id)
+    transcript = fetch_youtube_transcript(youtube_url)
     if not transcript:
         return {"error": "Failed to load transcript"}
 
@@ -186,7 +186,7 @@ async def run_fact_check(youtube_url: str, dedup_method: str = "llm"):
         json_match = re.search(r"```json\s*(.*?)\s*```", raw_llm_output, re.DOTALL)
         if json_match:
             json_string = json_match.group(1).strip()
-            dedup_claims = json.loads(json_string)
+            dedup_claims = json.loads(json_string)video_transcript
         else:
             logging.warning("LLM deduplication output is not in expected JSON markdown format. Using original parsed claims.")
             dedup_claims = parsed_claims

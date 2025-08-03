@@ -41,8 +41,6 @@ def fetch_youtube_transcript(video_url):
     """
     EC2 내부 쿠키를 사용하여 yt-dlp로 음원 다운로드 후 Whisper로 자막 추출
     """
-    # 이 함수는 run_fact_check에서 호출될 때 video_url을 인자로 받습니다.
-    # 따라서 여기서 video_id를 추출하는 것이 올바른 순서입니다.
     video_id = extract_video_id(video_url)
     logging.info(f"[디버깅] 추출된 video_id: {video_id}")
     if not video_id:
@@ -93,7 +91,7 @@ def fetch_youtube_transcript(video_url):
             os.remove(temp_audio_file)
             logging.info(f"🗑️ 임시 파일 삭제 완료: {temp_audio_file}")
 
-# 이하 코드는 이전과 동일합니다.
+
 def extract_chosun_with_selenium(url):
     """
     Selenium을 사용하여 조선일보 기사 본문을 추출합니다.
@@ -154,16 +152,17 @@ def get_article_text(url):
     }
 
     parsed_url = urlparse(url)
-    is_chosun = "chosun.com" in parsed_url.netloc
     clean_url = urlunparse(parsed_url._replace(query='', fragment=''))
 
-    if is_chosun:
+    # 1. 조선일보에 대한 Selenium 특별 처리
+    if "chosun.com" in parsed_url.netloc:
         selenium_text = extract_chosun_with_selenium(clean_url)
         if selenium_text and len(selenium_text) > 300:
             return selenium_text
         else:
             logging.warning(f"Selenium으로 조선일보 본문 추출 실패 또는 내용 부족. newspaper 및 requests 폴백 시도.")
 
+    # 2. newspaper 라이브러리를 사용한 일반적인 크롤링 시도
     try:
         article = Article(clean_url, language="ko", headers=headers)
         article.download()
@@ -178,6 +177,7 @@ def get_article_text(url):
     except Exception as e:
         logging.exception(f"newspaper 크롤링 실패 ({clean_url}): {e}. requests + BeautifulSoup 폴백 시도.")
     
+    # 3. requests와 BeautifulSoup를 사용한 마지막 폴백
     try:
         response = requests.get(clean_url, headers=headers, timeout=10)
         response.raise_for_status()
@@ -185,7 +185,8 @@ def get_article_text(url):
         soup = BeautifulSoup(response.text, 'html.parser')
         article_content = []
 
-        if is_chosun:
+        # 조선일보이거나 다른 언론사라도 본문 선택자 로직 재시도
+        if "chosun.com" in parsed_url.netloc:
             article_body_section = soup.select_one('section.article-body')  
             if article_body_section:
                 paragraphs = article_body_section.find_all('p')  
@@ -193,35 +194,29 @@ def get_article_text(url):
                     text = p.get_text(strip=True)
                     if text and not any(keyword in text for keyword in ["chosun.com", "기자", "Copyright", "무단전재"]):
                         article_content.append(text)
-                if article_content:
-                    full_text = '\n'.join(article_content)
-                    if len(full_text) > 300:
-                        return full_text
-                    else:
-                        logging.warning(f"requests+BeautifulSoup로 조선일보 본문 추출했으나 내용이 짧음 ({len(full_text)}자).")
-                else:
-                    logging.warning(f"requests+BeautifulSoup로도 조선일보 본문 요소 ('section.article-body')를 찾을 수 없음.")
-            else:
-                body_elements = soup.select('div.article_content, div#articleBodyContents, div#article_body, div.news_content, article.article_view, div.view_content')
-                for elem in body_elements:
-                    text = elem.get_text(separator='\n', strip=True)
-                    if text:
-                        article_content.append(text)
-            
-            full_text = '\n'.join(article_content)
-            if len(full_text) > 300:
-                return full_text
-            else:
-                logging.warning(f"requests+BeautifulSoup로 일반 기사 본문 내용이 너무 짧음 ({len(full_text)}자): {clean_url}")
-            
-            return full_text if len(full_text) > 300 else ""
+                
+        # 일반적인 언론사 본문 선택자
+        else:
+            body_elements = soup.select('div.article_content, div#articleBodyContents, div#article_body, div.news_content, article.article_view, div.view_content')
+            for elem in body_elements:
+                text = elem.get_text(separator='\n', strip=True)
+                if text:
+                    article_content.append(text)
+        
+        full_text = '\n'.join([c for c in article_content if c]) # None 값 제거
+        if len(full_text) > 300:
+            return full_text
+        else:
+            logging.warning(f"requests+BeautifulSoup로 본문 내용이 너무 짧음 ({len(full_text)}자): {clean_url}")
+            return ""
 
-        except requests.exceptions.RequestException as e:
-            logging.exception(f"HTTP 요청 중 오류 발생 ({clean_url}): {e}")
-            return ""
-        except Exception as e:
-            logging.exception(f"BeautifulSoup 텍스트 추출 중 오류 발생 ({clean_url}): {e}")
-            return ""
+    except requests.exceptions.RequestException as e:
+        logging.exception(f"HTTP 요청 중 오류 발생 ({clean_url}): {e}")
+        return ""
+    except Exception as e:
+        logging.exception(f"BeautifulSoup 텍스트 추출 중 오류 발생 ({clean_url}): {e}")
+        return ""
+
 
 def clean_news_title(title):
     """
@@ -331,7 +326,6 @@ def calculate_source_diversity_score(evidence):
         # source_title이 없으면 URL의 도메인을 사용
         elif item.get("url"):
             try:
-                from urllib.parse import urlparse
                 domain = urlparse(item["url"]).netloc
                 if domain:
                     unique_sources.add(domain.lower())
