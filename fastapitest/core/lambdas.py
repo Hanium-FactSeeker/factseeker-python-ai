@@ -55,12 +55,11 @@ def extract_video_id(url: str):
     logging.error("❌ video_id 추출 실패")
     return None
 
-def fetch_youtube_transcript(video_url):
+def fetch_youtube_transcript(video_id):
     """
     EC2 내부 쿠키를 사용하여 yt-dlp로 음원 다운로드 후 Whisper로 자막 추출
     """
-    video_id = extract_video_id(video_url)
-    logging.info(f"[디버깅] 추출된 video_id: {video_id}")
+    # video_id를 인자로 직접 받으므로, extract_video_id를 호출할 필요가 없습니다.
     if not video_id:
         logging.error("유효한 YouTube URL이 아닙니다.")
         return ""
