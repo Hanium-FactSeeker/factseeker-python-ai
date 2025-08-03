@@ -19,31 +19,38 @@ import yt_dlp
 import re
 from urllib.parse import urlparse
 
-def extract_video_id(url: str):
-    """유튜브 URL에서 정확하게 video_id 추출"""
-    # 여러 URL 패턴을 하나의 리스트에 정의
-    patterns = [
-        r"(?:v=|/|youtu\.be/|shorts/|embed/)([0-9A-Za-z_-]{11})",
-        r"googleusercontent\.com/youtube\.com/([0-9A-Za-z_-]{11})"
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
+from urllib.parse import urlparse, parse_qs
 
+def extract_video_id(url: str):
+    try:
+        parsed = urlparse(url)
+        if "youtube.com" in parsed.netloc:
+            qs = parse_qs(parsed.query)
+            video_id = qs.get("v", [None])[0]
+            if video_id and len(video_id) == 11:
+                return video_id
+        elif "youtu.be" in parsed.netloc:
+            video_id = parsed.path.lstrip("/")
+            if len(video_id) == 11:
+                return video_id
+        elif "shorts" in parsed.path:
+            video_id = parsed.path.split("/shorts/")[-1][:11]
+            if len(video_id) == 11:
+                return video_id
+    except Exception as e:
+        logging.warning(f"[extract_video_id 오류] {e}")
     return None
+
 
 def fetch_youtube_transcript(video_url):
     """
     EC2 내부 쿠키를 사용하여 yt-dlp로 음원 다운로드 후 Whisper로 자막 추출
     """
     video_id = extract_video_id(video_url)
+    logging.info(f"[디버깅] 추출된 video_id: {video_id}")
     if not video_id:
         logging.error("유효한 YouTube URL이 아닙니다.")
         return ""
-
-    # ... 이하 코드는 기존과 동일
 
     # ✅ EC2에서 고정된 쿠키 경로 사용
     cookies_path = "/home/ubuntu/factseeker-python-ai/fastapitest/cookies.txt"
