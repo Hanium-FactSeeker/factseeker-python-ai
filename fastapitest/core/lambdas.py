@@ -17,8 +17,17 @@ import openai
 import yt_dlp
 
 def extract_video_id(url):
-    match = re.search(r'(?:v=|/)([0-9A-Za-z_-]{11})', url)
-    return match.group(1) if match else None
+    patterns = [
+        r"(?:v=|\/)([0-9A-Za-z_-]{11})",            # 일반 URL
+        r"youtu\.be\/([0-9A-Za-z_-]{11})",          # 단축 URL
+        r"embed\/([0-9A-Za-z_-]{11})",              # 임베드
+        r"shorts\/([0-9A-Za-z_-]{11})"              # 쇼츠
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
 
 def fetch_youtube_transcript(video_url):
     """
