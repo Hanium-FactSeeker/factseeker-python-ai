@@ -9,12 +9,20 @@ from bs4 import BeautifulSoup
 from newspaper import Article
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import time
 import logging
 
 # Whisper 관련 라이브러리 추가
 import openai
 import yt_dlp
+
+# Logging setup
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 
 def extract_video_id(url: str):
     """
@@ -53,28 +61,32 @@ def fetch_youtube_transcript(video_url):
         return ""
     
     cookies_path = "/home/ubuntu/factseeker-python-ai/fastapitest/cookies.txt"
-    temp_audio_file = f"{video_id}.mp3"
+    # yt-dlp가 다운로드할 파일명을 지정합니다. 원본 오디오 파일 확장자는 yt-dlp가 자동으로 결정합니다.
+    temp_audio_file_template = f"{video_id}"
+    downloaded_files = []
 
     try:
         ydl_opts = {
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'outtmpl': temp_audio_file,
+            'format': 'bestaudio/best', # 최적의 오디오 포맷을 다운로드합니다.
+            'outtmpl': temp_audio_file_template,
             'cookiefile': cookies_path,
             'quiet': True,
         }
 
         logging.info(f"🎬 yt-dlp로 음원 다운로드 시작: {video_url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
+            info = ydl.extract_info(video_url, download=True)
+            # 다운로드된 파일의 실제 경로를 가져옵니다.
+            downloaded_files = ydl.sanitize_info(info)['requested_downloads']
+            if not downloaded_files:
+                raise Exception("yt-dlp 다운로드 실패")
+            # yt-dlp는 outtmpl에 파일 확장자를 자동으로 추가하므로 실제 파일명을 찾아야 합니다.
+            actual_audio_file = downloaded_files[0]['filepath']
 
-        logging.info(f"✅ 음원 다운로드 완료: {temp_audio_file}")
 
-        with open(temp_audio_file, "rb") as audio_file:
+        logging.info(f"✅ 음원 다운로드 완료: {actual_audio_file}")
+
+        with open(actual_audio_file, "rb") as audio_file:
             transcript = openai.Audio.transcribe(
                 "whisper-1",
                 audio_file,
@@ -87,9 +99,11 @@ def fetch_youtube_transcript(video_url):
         logging.exception(f"yt-dlp 또는 Whisper 처리 중 오류: {e}")
         return ""
     finally:
-        if os.path.exists(temp_audio_file):
-            os.remove(temp_audio_file)
-            logging.info(f"🗑️ 임시 파일 삭제 완료: {temp_audio_file}")
+        # 다운로드된 모든 임시 파일 삭제
+        for file in downloaded_files:
+            if os.path.exists(file['filepath']):
+                os.remove(file['filepath'])
+                logging.info(f"🗑️ 임시 파일 삭제 완료: {file['filepath']}")
 
 
 def extract_chosun_with_selenium(url):
