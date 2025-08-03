@@ -22,36 +22,38 @@ from urllib.parse import urlparse
 from urllib.parse import urlparse, parse_qs
 
 def extract_video_id(url: str):
+    """
+    유튜브 URL에서 11자리 video_id를 추출합니다.
+    """
     try:
         parsed = urlparse(url)
         logging.info(f"[디버깅] URL 파싱 결과: {parsed}")
-        
-        # 일반적인 https://www.youtube.com/watch?v=ID
-        if "youtube.com" in parsed.netloc:
-            qs = parse_qs(parsed.query)
-            video_id = qs.get("v", [None])[0]
+
+        # 일반적인 watch URL: https://www.youtube.com/watch?v=VIDEO_ID
+        if parsed.hostname in ['www.youtube.com', 'youtube.com'] and parsed.path == '/watch':
+            query = parse_qs(parsed.query)
+            video_id = query.get('v', [None])[0]
             logging.info(f"[디버깅] 파라미터에서 추출된 video_id: {video_id}")
-            if video_id and len(video_id) == 11:
-                return video_id
-        
-        # 단축 주소 https://youtu.be/ID
-        if "youtu.be" in parsed.netloc:
-            video_id = parsed.path.lstrip("/")
+            return video_id
+
+        # 짧은 URL: https://youtu.be/VIDEO_ID
+        if parsed.hostname == 'youtu.be':
+            video_id = parsed.path[1:]
             logging.info(f"[디버깅] youtu.be에서 추출된 video_id: {video_id}")
-            if video_id and len(video_id) == 11:
-                return video_id
-        
-        # Shorts URL https://www.youtube.com/shorts/ID
-        if "/shorts/" in parsed.path:
-            video_id = parsed.path.split("/shorts/")[-1][:11]
-            logging.info(f"[디버깅] shorts에서 추출된 video_id: {video_id}")
-            if video_id and len(video_id) == 11:
-                return video_id
+            return video_id
+
+        # 임베드 or shorts
+        match = re.search(r"(embed|shorts)/([0-9A-Za-z_-]{11})", url)
+        if match:
+            video_id = match.group(2)
+            logging.info(f"[디버깅] 임베드/쇼츠 URL에서 추출된 video_id: {video_id}")
+            return video_id
 
     except Exception as e:
-        logging.exception(f"[extract_video_id 예외 발생] {e}")
-    return None
+        logging.exception(f"extract_video_id 오류: {e}")
 
+    logging.error("❌ video_id 추출 실패")
+    return None
 
 def fetch_youtube_transcript(video_url):
     """
