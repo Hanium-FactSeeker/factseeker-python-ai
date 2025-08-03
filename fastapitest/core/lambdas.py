@@ -16,21 +16,22 @@ import logging
 import openai
 import yt_dlp
 
-def extract_video_id(url):
-    """YouTube URL에서 비디오 ID를 추출합니다."""
-    # yt-dlp에서 자주 사용되는 googleusercontent.com 패턴을 추가합니다.
-    patterns = [
-        r"(?:v=|\/)([0-9A-Za-z_-]{11})",      # 일반 URL
-        r"youtu\.be\/([0-9A-Za-z_-]{11})",    # 단축 URL
-        r"embed\/([0-9A-Za-z_-]{11})",        # 임베드
-        r"shorts\/([0-9A-Za-z_-]{11})",       # 쇼츠
-        r"googleusercontent\.com\/youtube\.com\/([0-9A-Za-z_-]{11})" # ✅ 수정된 부분
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
+def extract_video_id(url: str):
+    """유튜브 URL에서 정확하게 video_id 추출"""
+    try:
+        parsed = urlparse(url)
+        if "youtube" in parsed.netloc:
+            query = dict(re.findall(r'(\w+)=([^\&]+)', parsed.query))
+            if 'v' in query and len(query['v']) == 11:
+                return query['v']
+        elif "youtu.be" in parsed.netloc:
+            video_id = parsed.path.lstrip("/")
+            if len(video_id) == 11:
+                return video_id
+    except Exception as e:
+        logging.warning(f"URL 파싱 중 오류: {e}")
     return None
+
 
 def fetch_youtube_transcript(video_url):
     """
