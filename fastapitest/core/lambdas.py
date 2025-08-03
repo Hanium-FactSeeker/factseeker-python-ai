@@ -49,6 +49,7 @@ def fetch_youtube_transcript(video_url):
     """
     EC2 내부 쿠키를 사용하여 yt-dlp로 음원 다운로드 후 Whisper로 자막 추출
     - openai 라이브러리 v1.0.0+에 맞춰 API 호출 방식 수정
+    - yt-dlp 다운로드 파일에 확장자를 포함하도록 수정
     """
     video_id = extract_video_id(video_url)
     logging.info(f"[디버깅] 추출된 video_id: {video_id}")
@@ -64,9 +65,9 @@ def fetch_youtube_transcript(video_url):
         return ""
 
     cookies_path = "/home/ubuntu/factseeker-python-ai/fastapitest/cookies.txt"
-    # yt-dlp가 다운로드할 파일명을 지정합니다. 원본 오디오 파일 확장자는 yt-dlp가 자동으로 결정합니다.
-    temp_audio_file_template = f"{video_id}"
-    downloaded_files = []
+    # yt-dlp가 다운로드할 파일명을 지정합니다. 파일 확장자를 포함하도록 템플릿 수정.
+    temp_audio_file_template = f"{video_id}.%(ext)s"
+    downloaded_file_paths = []
 
     try:
         ydl_opts = {
@@ -79,13 +80,19 @@ def fetch_youtube_transcript(video_url):
         logging.info(f"🎬 yt-dlp로 음원 다운로드 시작: {video_url}")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
+            
             # 다운로드된 파일의 실제 경로를 가져옵니다.
-            downloaded_files = ydl.sanitize_info(info)['requested_downloads']
-            if not downloaded_files:
+            download_info = ydl.sanitize_info(info)
+            if 'requested_downloads' in download_info:
+                downloaded_file_paths = [d['filepath'] for d in download_info['requested_downloads']]
+            elif '_filename' in download_info:
+                # 단일 파일 다운로드의 경우
+                downloaded_file_paths.append(download_info['_filename'])
+            
+            if not downloaded_file_paths:
                 raise Exception("yt-dlp 다운로드 실패")
-            # yt-dlp는 outtmpl에 파일 확장자를 자동으로 추가하므로 실제 파일명을 찾아야 합니다.
-            actual_audio_file = downloaded_files[0]['filepath']
 
+            actual_audio_file = downloaded_file_paths[0]
 
         logging.info(f"✅ 음원 다운로드 완료: {actual_audio_file}")
 
@@ -103,10 +110,10 @@ def fetch_youtube_transcript(video_url):
         return ""
     finally:
         # 다운로드된 모든 임시 파일 삭제
-        for file in downloaded_files:
-            if os.path.exists(file['filepath']):
-                os.remove(file['filepath'])
-                logging.info(f"🗑️ 임시 파일 삭제 완료: {file['filepath']}")
+        for file_path in downloaded_file_paths:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                logging.info(f"🗑️ 임시 파일 삭제 완료: {file_path}")
 
 
 def extract_chosun_with_selenium(url):
