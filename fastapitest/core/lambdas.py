@@ -53,6 +53,7 @@ async def fetch_youtube_transcript(video_id):
                 'preferredquality': '192',
             }],
             'outtmpl': audio_filename,
+            'cookiefile': os.path.join(os.getcwd(), "cookies.txt"),  # ✅ EC2에 업로드한 쿠키 파일 사용
             'quiet': True,
         }
         
