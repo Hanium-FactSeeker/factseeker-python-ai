@@ -16,11 +16,6 @@ import logging
 import openai
 import yt_dlp
 
-# Google API Key 및 CSE ID는 main.py에서 로드되므로, 여기서 직접 참조하지 않습니다.
-# 대신, 필요한 경우 함수 인자로 받거나 전역 설정 객체로 관리할 수 있습니다.
-# 여기서는 get_article_text가 외부 의존성을 가지지 않도록 수정합니다.
-
-
 def extract_video_id(url):
     """YouTube URL에서 비디오 ID를 추출합니다."""
     match = re.search(r'(?:v=|/)([0-9A-Za-z_-]{11})', url)
@@ -30,6 +25,7 @@ def extract_video_id(url):
 async def fetch_youtube_transcript(video_id):
     """
     yt-dlp와 OpenAI Whisper API를 사용하여 YouTube 비디오의 자막을 생성합니다.
+    (cookies.txt 파일 대신 yt-dlp의 oauth2 인증 방식에 의존합니다.)
     """
     if not video_id:
         logging.error("비디오 ID가 유효하지 않습니다.")
@@ -53,14 +49,17 @@ async def fetch_youtube_transcript(video_id):
                 'preferredquality': '192',
             }],
             'outtmpl': audio_filename,
-            'cookiefile': '/home/ubuntu/factseeker-python-ai/fastapitest/cookies.txt', 
-            'no_check_certificate': True,  # ✅ EC2에 업로드한 쿠키 파일 사용
+            # 'cookiefile' 및 'no_check_certificate' 옵션 제거
             'quiet': True,
         }
         
         logging.info(f"🎶 yt-dlp로 YouTube 음원 다운로드 시작: {video_id}")
+        
+        # 표준 YouTube URL 형식으로 변경
+        youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=True)
+            ydl.download([youtube_url])
         
         temp_audio_file = audio_filename
         logging.info(f"✅ 음원 다운로드 완료: {temp_audio_file}")
@@ -76,14 +75,8 @@ async def fetch_youtube_transcript(video_id):
         logging.info("✅ Whisper API로 자막 생성 완료")
         return transcript.text
 
-    except yt_dlp.utils.DownloadError as e:
-        logging.exception(f"yt-dlp 다운로드 실패: {e}")
-        return ""
-    except openai.error.OpenAIError as e:
-        logging.exception(f"Whisper API 호출 실패: {e}")
-        return ""
     except Exception as e:
-        logging.exception(f"YouTube 음원 처리 중 예상치 못한 오류 발생: {e}")
+        logging.exception(f"yt-dlp 또는 Whisper 처리 중 오류 발생: {e}")
         return ""
     finally:
         # 3. 임시 파일 삭제
