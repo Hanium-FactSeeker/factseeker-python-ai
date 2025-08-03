@@ -4,7 +4,7 @@ import aiohttp
 import hashlib
 import os
 import requests
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, parse_qs
 from bs4 import BeautifulSoup
 from newspaper import Article
 from selenium import webdriver
@@ -16,37 +16,19 @@ import logging
 import openai
 import yt_dlp
 
-import re
-from urllib.parse import urlparse
-
-from urllib.parse import urlparse, parse_qs
-
 def extract_video_id(url: str):
     """
     유튜브 URL에서 11자리 video_id를 추출합니다.
+    다양한 형태의 URL을 처리할 수 있도록 정규식을 개선했습니다.
     """
     try:
-        parsed = urlparse(url)
-        logging.info(f"[디버깅] URL 파싱 결과: {parsed}")
-
-        # 일반적인 watch URL: https://www.youtube.com/watch?v=VIDEO_ID
-        if parsed.hostname in ['www.youtube.com', 'youtube.com'] and parsed.path == '/watch':
-            query = parse_qs(parsed.query)
-            video_id = query.get('v', [None])[0]
-            logging.info(f"[디버깅] 파라미터에서 추출된 video_id: {video_id}")
-            return video_id
-
-        # 짧은 URL: https://youtu.be/VIDEO_ID
-        if parsed.hostname == 'youtu.be':
-            video_id = parsed.path[1:]
-            logging.info(f"[디버깅] youtu.be에서 추출된 video_id: {video_id}")
-            return video_id
-
-        # 임베드 or shorts
-        match = re.search(r"(embed|shorts)/([0-9A-Za-z_-]{11})", url)
+        # 모든 가능한 YouTube URL 패턴을 처리하는 정규식
+        match = re.search(
+            r"(?:v=|/|youtu\.be/|shorts/|embed/)([0-9A-Za-z_-]{11})", url
+        )
         if match:
-            video_id = match.group(2)
-            logging.info(f"[디버깅] 임베드/쇼츠 URL에서 추출된 video_id: {video_id}")
+            video_id = match.group(1)
+            logging.info(f"[디버깅] URL에서 추출된 video_id: {video_id}")
             return video_id
 
     except Exception as e:
@@ -55,16 +37,23 @@ def extract_video_id(url: str):
     logging.error("❌ video_id 추출 실패")
     return None
 
-def fetch_youtube_transcript(video_id):
+def fetch_youtube_transcript(video_url):
     """
     EC2 내부 쿠키를 사용하여 yt-dlp로 음원 다운로드 후 Whisper로 자막 추출
     """
-    # video_id를 인자로 직접 받으므로, extract_video_id를 호출할 필요가 없습니다.
+    # 이 함수는 run_fact_check에서 호출될 때 video_url을 인자로 받습니다.
+    # 따라서 여기서 video_id를 추출하는 것이 올바른 순서입니다.
+    video_id = extract_video_id(video_url)
+    logging.info(f"[디버깅] 추출된 video_id: {video_id}")
     if not video_id:
         logging.error("유효한 YouTube URL이 아닙니다.")
         return ""
 
-    # ✅ EC2에서 고정된 쿠키 경로 사용
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+    if not openai.api_key:
+        logging.error("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
+        return ""
+    
     cookies_path = "/home/ubuntu/factseeker-python-ai/fastapitest/cookies.txt"
     temp_audio_file = f"{video_id}.mp3"
 
@@ -104,8 +93,7 @@ def fetch_youtube_transcript(video_id):
             os.remove(temp_audio_file)
             logging.info(f"🗑️ 임시 파일 삭제 완료: {temp_audio_file}")
 
-
-
+# 이하 코드는 이전과 동일합니다.
 def extract_chosun_with_selenium(url):
     """
     Selenium을 사용하여 조선일보 기사 본문을 추출합니다.
@@ -118,18 +106,8 @@ def extract_chosun_with_selenium(url):
     options.add_argument("--disable-gpu")  # GPU 사용 비활성화 (일부 환경에서 필요)
     options.add_argument("--window-size=1920,1080")  # 창 크기 설정
     
-    # --- 중요: 로컬 환경에 맞는 ChromeDriver 경로 설정 ---
-    # chromedriver_path = "/path/to/your/chromedriver" # 실제 경로로 변경
-    # driver = webdriver.Chrome(executable_path=chromedriver_path, options=options)
-    # 로컬에서 테스트할 때는 PATH에 chromedriver가 있거나, 위에 주석처리된 라인의 주석을 풀고 경로를 지정해주세요.
-    # 아니면, webdriver_manager 라이브러리를 사용해 자동 설치할 수 있습니다.
-    # from webdriver_manager.chrome import ChromeDriverManager
-    # driver = webdriver.Chrome(ChromeDriverManager().install(), options=options)
-    # ---------------------------------------------------
-
     driver = None
     try:
-        
         driver = webdriver.Chrome(options=options)  # PATH에 chromedriver가 있다고 가정
         logging.info(f"🌐 Selenium으로 URL 접속 시도: {url}")
         driver.get(url)
@@ -238,12 +216,12 @@ def get_article_text(url):
             
             return full_text if len(full_text) > 300 else ""
 
-    except requests.exceptions.RequestException as e:
-        logging.exception(f"HTTP 요청 중 오류 발생 ({clean_url}): {e}")
-        return ""
-    except Exception as e:
-        logging.exception(f"BeautifulSoup 텍스트 추출 중 오류 발생 ({clean_url}): {e}")
-        return ""
+        except requests.exceptions.RequestException as e:
+            logging.exception(f"HTTP 요청 중 오류 발생 ({clean_url}): {e}")
+            return ""
+        except Exception as e:
+            logging.exception(f"BeautifulSoup 텍스트 추출 중 오류 발생 ({clean_url}): {e}")
+            return ""
 
 def clean_news_title(title):
     """
