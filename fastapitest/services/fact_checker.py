@@ -53,13 +53,22 @@ async def search_and_retrieve_docs(claim):
             continue
         
         try:
-            # 기사 텍스트 추출 (캐시 포함)
-            article_text = await get_or_build_faiss(
+            # 기사 텍스트를 먼저 가져옴
+            article_text = await get_article_text(url)
+            
+            if not article_text or len(article_text) < 200:
+                logging.warning(f"기사 텍스트 가져오기 실패 또는 너무 짧음: {url}")
+                continue
+
+            # 가져온 텍스트를 기반으로 FAISS DB를 로드하거나 새로 구축
+            faiss_db_result = await get_or_build_faiss(
                 url=url, 
+                article_text=article_text, # 이제 article_text를 제공합니다.
                 embed_model=embed_model,
             )
             
-            if article_text and len(article_text) > 200:
+            # get_or_build_faiss가 FAISS DB 객체를 반환한다고 가정
+            if faiss_db_result:
                 # 기사 텍스트를 Document 객체로 변환
                 doc = Document(
                     page_content=article_text,
@@ -71,6 +80,7 @@ async def search_and_retrieve_docs(claim):
                 )
                 docs.append(doc)
                 retrieved_urls.add(url)
+
         except Exception as e:
             logging.error(f"기사 처리 중 오류 발생 ({url}): {e}")
             continue
@@ -97,7 +107,6 @@ async def run_fact_check(youtube_url):
         # 1. 팩트체크 가능한 주장 추출
         extractor = build_claim_extractor()
         result = await extractor.ainvoke({"transcript": transcript})
-        # LangChain AIMessage 객체에서 content 속성을 사용하도록 수정
         claims = [line.strip() for line in result.content.strip().split('\n') if line.strip()]
         
         # 주장이 없는 경우
@@ -112,15 +121,33 @@ async def run_fact_check(youtube_url):
         
         # 2. 유사하거나 중복되는 주장 제거
         reducer = build_reduce_similar_claims_chain()
-        # claims_from_llm을 JSON 형식으로 변환하여 claims_json 변수에 할당
         claims_json = json.dumps(claims, ensure_ascii=False, indent=2)
         reduced_result = await reducer.ainvoke({"claims_json": claims_json})
         
-        # LangChain AIMessage 객체에서 content 속성을 사용하도록 수정
-        claims_to_check = [
-            line.strip() for line in reduced_result.content.strip().split('\n')
-            if line.strip()
-        ][:MAX_CLAIMS_TO_FACT_CHECK]
+        # LLM 응답을 JSON으로 안전하게 파싱하도록 수정
+        claims_to_check = []
+        try:
+            json_match = re.search(r"```json\s*(\[.*?\])\s*```", reduced_result.content, re.DOTALL)
+            if json_match:
+                json_content = json_match.group(1)
+                claims_to_check = json.loads(json_content)
+            else:
+                logging.warning("LLM 응답에서 JSON 코드 블록을 찾지 못했습니다. 원본 텍스트를 파싱합니다.")
+                claims_to_check = [
+                    line.strip() for line in reduced_result.content.strip().split('\n')
+                    if line.strip()
+                ]
+
+        except json.JSONDecodeError as e:
+            logging.error(f"LLM 응답 JSON 파싱 실패: {e}")
+            # 파싱 실패 시, 원본 텍스트를 줄 단위로 처리
+            claims_to_check = [
+                line.strip() for line in reduced_result.content.strip().split('\n')
+                if line.strip() and not line.strip().startswith(('```json', '```', '[', ']'))
+            ]
+        
+        # 최대 팩트체크 주장 수로 제한
+        claims_to_check = claims_to_check[:MAX_CLAIMS_TO_FACT_CHECK]
         
         logging.info(f"✂️ 중복 제거 후 최종 팩트체크 대상 주장 {len(claims_to_check)}개: {claims_to_check}")
 
