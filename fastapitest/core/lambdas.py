@@ -24,21 +24,32 @@ from urllib.parse import urlparse, parse_qs
 def extract_video_id(url: str):
     try:
         parsed = urlparse(url)
+        logging.info(f"[디버깅] URL 파싱 결과: {parsed}")
+        
+        # 일반적인 https://www.youtube.com/watch?v=ID
         if "youtube.com" in parsed.netloc:
             qs = parse_qs(parsed.query)
             video_id = qs.get("v", [None])[0]
+            logging.info(f"[디버깅] 파라미터에서 추출된 video_id: {video_id}")
             if video_id and len(video_id) == 11:
                 return video_id
-        elif "youtu.be" in parsed.netloc:
+        
+        # 단축 주소 https://youtu.be/ID
+        if "youtu.be" in parsed.netloc:
             video_id = parsed.path.lstrip("/")
-            if len(video_id) == 11:
+            logging.info(f"[디버깅] youtu.be에서 추출된 video_id: {video_id}")
+            if video_id and len(video_id) == 11:
                 return video_id
-        elif "shorts" in parsed.path:
+        
+        # Shorts URL https://www.youtube.com/shorts/ID
+        if "/shorts/" in parsed.path:
             video_id = parsed.path.split("/shorts/")[-1][:11]
-            if len(video_id) == 11:
+            logging.info(f"[디버깅] shorts에서 추출된 video_id: {video_id}")
+            if video_id and len(video_id) == 11:
                 return video_id
+
     except Exception as e:
-        logging.warning(f"[extract_video_id 오류] {e}")
+        logging.exception(f"[extract_video_id 예외 발생] {e}")
     return None
 
 
