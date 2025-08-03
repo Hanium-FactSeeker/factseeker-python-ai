@@ -148,10 +148,12 @@ def parse_channel_type(llm_output: str):
 
 async def run_fact_check(youtube_url: str, dedup_method: str = "llm"):
     logging.info(f"유튜브 분석 시작: {youtube_url}")
+
+    video_id = extract_video_id(youtube_url)
     if not video_id:
         return {"error": "Invalid YouTube URL"}
-
-    transcript = fetch_youtube_transcript(youtube_url)
+    
+    transcript = fetch_youtube_transcript(video_id)
     if not transcript:
         return {"error": "Failed to load transcript"}
 
