@@ -16,22 +16,23 @@ import logging
 import openai
 import yt_dlp
 
+import re
+from urllib.parse import urlparse
+
 def extract_video_id(url: str):
     """유튜브 URL에서 정확하게 video_id 추출"""
-    try:
-        parsed = urlparse(url)
-        if "youtube" in parsed.netloc:
-            query = dict(re.findall(r'(\w+)=([^\&]+)', parsed.query))
-            if 'v' in query and len(query['v']) == 11:
-                return query['v']
-        elif "youtu.be" in parsed.netloc:
-            video_id = parsed.path.lstrip("/")
-            if len(video_id) == 11:
-                return video_id
-    except Exception as e:
-        logging.warning(f"URL 파싱 중 오류: {e}")
-    return None
+    # 여러 URL 패턴을 하나의 리스트에 정의
+    patterns = [
+        r"(?:v=|/|youtu\.be/|shorts/|embed/)([0-9A-Za-z_-]{11})",
+        r"googleusercontent\.com/youtube\.com/([0-9A-Za-z_-]{11})"
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
 
+    return None
 
 def fetch_youtube_transcript(video_url):
     """
@@ -42,10 +43,7 @@ def fetch_youtube_transcript(video_url):
         logging.error("유효한 YouTube URL이 아닙니다.")
         return ""
 
-    openai.api_key = os.getenv("OPENAI_API_KEY")
-    if not openai.api_key:
-        logging.error("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
-        return ""
+    # ... 이하 코드는 기존과 동일
 
     # ✅ EC2에서 고정된 쿠키 경로 사용
     cookies_path = "/home/ubuntu/factseeker-python-ai/fastapitest/cookies.txt"
