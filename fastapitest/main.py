@@ -1,57 +1,72 @@
 import os
-import asyncio
 import json
-import faiss
-from langchain.docstore.document import Document
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-
-# 서비스 로직 임포트
-from services.fact_checker import run_fact_check
-from core.faiss_manager import FAISS_DB_PATH, CHUNK_CACHE_DIR
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from core.lambdas import clean_news_title, search_news_google_cs # 필요한 유틸리티 추가
+import hashlib
 import logging
+import boto3
+import faiss
+import pickle
+from langchain.docstore.document import Document
+from langchain_community.vectorstores import FAISS
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+CHUNK_CACHE_DIR = "article_faiss_cache"
+S3_BUCKET_NAME = "factseeker-faiss-db"
+S3_PREFIX = "article_faiss_cache/"
+os.makedirs(CHUNK_CACHE_DIR, exist_ok=True)
 
-app = FastAPI(
-    title="YouTube Fact-Checker API",
-    description="유튜브 영상의 주장을 팩트체크하는 API",
-    version="1.0.0"
-)
+s3 = boto3.client("s3")
 
-# FAISS DB 및 캐시 디렉토리 생성 (서버 시작 시)
-@app.on_event("startup")
-async def startup_event():
-    
-    ("--- FastAPI 애플리케이션 시작 ---")
-    os.makedirs(CHUNK_CACHE_DIR, exist_ok=True)
+def sha256_of(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-class FactCheckRequest(BaseModel):
-    youtube_url: str
-
-class FactCheckResponse(BaseModel):
-    video_id: str
-    video_total_confidence_score: int
-    claims: list
-
-@app.post("/fact-check")
-async def perform_fact_check(request: FactCheckRequest):
-    """
-    제공된 유튜브 URL에 대해 팩트체크를 수행합니다.
-    """
-    logging.info(f"--- 팩트체크 요청 수신: {request.youtube_url} ---")
+def download_from_s3_if_exists(s3_key: str, local_path: str) -> bool:
     try:
-        logging.info("팩트체크 시작...")
-        result = await run_fact_check(request.youtube_url)
-        if "error" in result:
-            raise HTTPException(status_code=400, detail=result["error"])
-        return result   # dict 전체 그대로 반환!
+        s3.download_file(S3_BUCKET_NAME, s3_key, local_path)
+        logging.info(f"🔽 S3에서 다운로드 완료: {s3_key}")
+        return True
     except Exception as e:
-        logging.exception(f"API 처리 중 예외 발생: {e}")
-        raise HTTPException(status_code=500, detail=f"팩트체크 처리 중 내부 서버 오류가 발생했습니다: {e}")
+        logging.warning(f"⚠️ S3 다운로드 실패: {s3_key} → {e}")
+        return False
+
+def upload_to_s3(local_path: str, s3_key: str):
+    try:
+        s3.upload_file(local_path, S3_BUCKET_NAME, s3_key)
+        logging.info(f"🆙 S3 업로드 완료: {s3_key}")
+    except Exception as e:
+        logging.error(f"❌ S3 업로드 실패: {s3_key} → {e}")
+
+def get_or_build_faiss(url: str, article_text: str, embed_model) -> FAISS:
+    hashed = sha256_of(url)
+    faiss_path = os.path.join(CHUNK_CACHE_DIR, f"{hashed}.faiss")
+    pkl_path = os.path.join(CHUNK_CACHE_DIR, f"{hashed}.pkl")
+    s3_faiss_key = f"{S3_PREFIX}{hashed}.faiss"
+    s3_pkl_key = f"{S3_PREFIX}{hashed}.pkl"
+
+    # ✅ 로컬에 없으면 S3에서 다운로드 시도
+    if not os.path.exists(faiss_path) or not os.path.exists(pkl_path):
+        logging.info("📦 로컬 캐시 없음 → S3에서 로딩 시도")
+        download_from_s3_if_exists(s3_faiss_key, faiss_path)
+        download_from_s3_if_exists(s3_pkl_key, pkl_path)
+
+    # ✅ 다운로드되었거나 원래부터 로컬에 있으면 로드
+    if os.path.exists(faiss_path) and os.path.exists(pkl_path):
+        logging.info("✅ FAISS 캐시 로드 완료")
+        with open(pkl_path, "rb") as f:
+            stored_texts = pickle.load(f)
+        return FAISS.load_local(faiss_path, embed_model, stored_texts)
+
+    # ❌ 둘 다 없으면 새로 생성
+    logging.info("⚙️ FAISS 인덱스 새로 생성 중...")
+    splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100)
+    chunks = splitter.split_text(article_text)
+    docs = [Document(page_content=chunk, metadata={"url": url}) for chunk in chunks]
+    db = FAISS.from_documents(docs, embed_model)
+    db.save_local(faiss_path)
+    with open(pkl_path, "wb") as f:
+        pickle.dump(docs, f)
+
+    # 업로드
+    upload_to_s3(faiss_path, s3_faiss_key)
+    upload_to_s3(pkl_path, s3_pkl_key)
+
+    return db
