@@ -28,11 +28,15 @@ async def preload_faiss_from_existing_s3():
 
     faiss_keys = list_faiss_keys_from_s3()
     for faiss_key in faiss_keys:
-        base = os.path.splitext(os.path.basename(faiss_key))[0]
-        pkl_key = f"{S3_PREFIX}{base}.pkl"
+        if not faiss_key.endswith(".faiss"):
+            continue
 
-        faiss_path = os.path.join(CHUNK_CACHE_DIR, f"{base}.faiss")
-        pkl_path = os.path.join(CHUNK_CACHE_DIR, f"{base}.pkl")
+        # 경로에서 폴더 이름 추출 (해시값)
+        dir_name = os.path.dirname(faiss_key).replace(S3_PREFIX, "").strip("/")
+        pkl_key = f"{S3_PREFIX}{dir_name}/index.pkl"
+
+        faiss_path = os.path.join(CHUNK_CACHE_DIR, f"{dir_name}.faiss")
+        pkl_path = os.path.join(CHUNK_CACHE_DIR, f"{dir_name}.pkl")
 
         start = time.time()
         faiss_ok = download_from_s3_if_exists(faiss_key, faiss_path)
@@ -40,6 +44,6 @@ async def preload_faiss_from_existing_s3():
         elapsed = time.time() - start
 
         if faiss_ok and pkl_ok:
-            logging.info(f"✅ 프리로드 완료: {base} ⏱️ {elapsed:.2f}초")
+            logging.info(f"✅ 프리로드 완료: {dir_name} ⏱️ {elapsed:.2f}초")
         else:
-            logging.warning(f"⚠️ 프리로드 실패: {base}")
+            logging.warning(f"⚠️ 프리로드 실패: {dir_name}")
