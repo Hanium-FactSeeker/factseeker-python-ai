@@ -44,12 +44,13 @@ async def startup_event():
     global FAISS_PARTITION_DIRS
     FAISS_PARTITION_DIRS = []
     for i in range(10):
-        faiss_path = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}.faiss")
-        pkl_path = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}.pkl")
+        faiss_path = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}", "index.faiss")
+        pkl_path = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}", "index.pkl")
+        logging.info(f"[DEBUG] 체크: {faiss_path} / {os.path.exists(faiss_path)}")
+        logging.info(f"[DEBUG] 체크: {pkl_path} / {os.path.exists(pkl_path)}")
         if os.path.exists(faiss_path) and os.path.exists(pkl_path):
-            if CHUNK_CACHE_DIR not in FAISS_PARTITION_DIRS:
-                FAISS_PARTITION_DIRS.append(CHUNK_CACHE_DIR)
-    logging.info(f"✅ 전체 FAISS 파티션 로드 경로: {FAISS_PARTITION_DIRS}")
+            FAISS_PARTITION_DIRS.append(os.path.join(CHUNK_CACHE_DIR, f"partition_{i}"))
+logging.info(f"✅ 전체 FAISS 파티션 로드 경로: {FAISS_PARTITION_DIRS}")
 
 class FactCheckRequest(BaseModel):
     youtube_url: str
