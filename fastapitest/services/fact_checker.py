@@ -153,73 +153,73 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         return {"error": f"Failed to extract claims: {e}"}
 
     async def process_claim_step(idx, claim):
-    try:
-        logging.info(f"[DEBUG] process_claim_step 진입: {idx} - '{claim}'")
-        logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
-        docs = await search_and_retrieve_docs(claim, faiss_partition_dirs)
-        if not docs:
-            logging.info(f"근거를 찾지 못함: '{claim}'")
+        try:
+            logging.info(f"[DEBUG] process_claim_step 진입: {idx} - '{claim}'")
+            logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
+            docs = await search_and_retrieve_docs(claim, faiss_partition_dirs)
+            if not docs:
+                logging.info(f"근거를 찾지 못함: '{claim}'")
+                return {
+                    "claim": claim,
+                    "result": "insufficient_evidence",
+                    "confidence_score": 0,
+                    "evidence": []
+                }
+            faiss_db_temp_path = os.path.join(CHUNK_CACHE_DIR, f"temp_faiss_{video_id}_{idx}")
+            if os.path.exists(faiss_db_temp_path):
+                shutil.rmtree(faiss_db_temp_path)
+
+            faiss_db = FAISS.from_documents(docs, embed_model)
+            faiss_db.save_local(faiss_db_temp_path)
+            logging.info(f"✅ 기사 문서 {len(docs)}개로 임시 FAISS DB 생성 완료")
+
+            retriever = faiss_db.as_retriever(search_kwargs={"k": 5})
+            validated_evidence = []
+            fact_checker = build_factcheck_chain()
+            for i, doc in enumerate(docs):
+                try:
+                    check_result = await fact_checker.ainvoke({
+                        "claim": claim,
+                        "context": doc.page_content
+                    })
+                    result_content = check_result.content
+                    relevance = re.search(r"관련성: (.+)", result_content)
+                    fact_check_result = re.search(r"사실 설명 여부: (.+)", result_content)
+                    justification = re.search(r"간단한 설명: (.+)", result_content)
+                    if relevance and fact_check_result and justification:
+                        if "예" in relevance.group(1):
+                            validated_evidence.append({
+                                "url": doc.metadata.get("url"),
+                                "relevance": "yes",
+                                "fact_check_result": fact_check_result.group(1).strip(),
+                                "justification": justification.group(1).strip()
+                            })
+                            logging.info(f"    - 근거 확보 ({i+1}): {doc.metadata.get('url')}")
+                except Exception as e:
+                    logging.error(f"    - LLM 팩트체크 체인 실행 중 오류: {e}")
+
+            if os.path.exists(faiss_db_temp_path):
+                shutil.rmtree(faiss_db_temp_path)
+
+            diversity_score = calculate_source_diversity_score(validated_evidence)
+            confidence_score = calculate_fact_check_confidence({
+                "source_diversity": diversity_score,
+                "evidence_count": min(len(validated_evidence), 5)
+            })
+
+            logging.info(f"--- 팩트체크 완료: '{claim}' -> 신뢰도: {confidence_score}%")
+
             return {
                 "claim": claim,
-                "result": "insufficient_evidence",
-                "confidence_score": 0,
-                "evidence": []
+                "result": "likely_true" if validated_evidence else "insufficient_evidence",
+                "confidence_score": confidence_score,
+                "evidence": validated_evidence[:3]
             }
-        faiss_db_temp_path = os.path.join(CHUNK_CACHE_DIR, f"temp_faiss_{video_id}_{idx}")
-        if os.path.exists(faiss_db_temp_path):
-            shutil.rmtree(faiss_db_temp_path)
 
-        faiss_db = FAISS.from_documents(docs, embed_model)
-        faiss_db.save_local(faiss_db_temp_path)
-        logging.info(f"✅ 기사 문서 {len(docs)}개로 임시 FAISS DB 생성 완료")
-
-        retriever = faiss_db.as_retriever(search_kwargs={"k": 5})
-        validated_evidence = []
-        fact_checker = build_factcheck_chain()
-        for i, doc in enumerate(docs):
-            try:
-                check_result = await fact_checker.ainvoke({
-                    "claim": claim,
-                    "context": doc.page_content
-                })
-                result_content = check_result.content
-                relevance = re.search(r"관련성: (.+)", result_content)
-                fact_check_result = re.search(r"사실 설명 여부: (.+)", result_content)
-                justification = re.search(r"간단한 설명: (.+)", result_content)
-                if relevance and fact_check_result and justification:
-                    if "예" in relevance.group(1):
-                        validated_evidence.append({
-                            "url": doc.metadata.get("url"),
-                            "relevance": "yes",
-                            "fact_check_result": fact_check_result.group(1).strip(),
-                            "justification": justification.group(1).strip()
-                        })
-                        logging.info(f"    - 근거 확보 ({i+1}): {doc.metadata.get('url')}")
-            except Exception as e:
-                logging.error(f"    - LLM 팩트체크 체인 실행 중 오류: {e}")
-
-        if os.path.exists(faiss_db_temp_path):
-            shutil.rmtree(faiss_db_temp_path)
-
-        diversity_score = calculate_source_diversity_score(validated_evidence)
-        confidence_score = calculate_fact_check_confidence({
-            "source_diversity": diversity_score,
-            "evidence_count": min(len(validated_evidence), 5)
-        })
-
-        logging.info(f"--- 팩트체크 완료: '{claim}' -> 신뢰도: {confidence_score}%")
-
-        return {
-            "claim": claim,
-            "result": "likely_true" if validated_evidence else "insufficient_evidence",
-            "confidence_score": confidence_score,
-            "evidence": validated_evidence[:3]
-        }
-
-    except Exception as e:
-        # 이 부분만 추가!
-        logging.error(f"[ERROR] process_claim_step 실패: idx={idx}, claim='{claim}', 에러={e}", exc_info=True)
-        return None
+        except Exception as e:
+            # 이 부분만 추가!
+            logging.error(f"[ERROR] process_claim_step 실패: idx={idx}, claim='{claim}', 에러={e}", exc_info=True)
+            return None
 
 
     claim_tasks = [
