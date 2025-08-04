@@ -33,6 +33,15 @@ DISTANCE_THRESHOLD = 0.8  # L2 거리 임계값
 
 embed_model = OpenAIEmbeddings(model="text-embedding-3-small", request_timeout=60, max_retries=5, chunk_size=500)
 
+async def get_article_text_safe(url):
+    """기사 본문 병렬 크롤링 시 예외 안전 래퍼"""
+    try:
+        text = await get_article_text(url)
+        return url, text
+    except Exception as e:
+        logging.warning(f"❌ 기사 본문 추출 실패: {url} - {e}")
+        return url, None
+
 async def search_and_retrieve_docs(claim, faiss_partition_dirs):
     summarizer = build_claim_summarizer()
     try:
@@ -55,7 +64,6 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
     for idx, faiss_dir in enumerate(faiss_partition_dirs):
         faiss_index_path = os.path.join(faiss_dir, "index.faiss")
         faiss_pkl_path = os.path.join(faiss_dir, "index.pkl")
-        # index.faiss, index.pkl 파일이 있는 파티션만
         if not (os.path.exists(faiss_index_path) and os.path.exists(faiss_pkl_path)):
             continue
         try:
@@ -71,7 +79,6 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
                     docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
                     doc = title_faiss_db.docstore._dict[docstore_id]
                     url = doc.metadata.get("url")
-                    # ✅ 중복 URL 없이, evidence용 title도 같이 저장
                     if url and url not in matched_urls:
                         matched_urls[url] = {
                             "matched_cse_title": cse_titles[j],
@@ -80,31 +87,25 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
         except Exception as e:
             logging.error(f"FAISS 파티션 {faiss_dir} 검색 실패: {e}")
 
+    # 🟢 뉴스 본문 크롤링을 "동시"에 실행
+    article_urls = list(matched_urls.keys())
+    coros = [get_article_text_safe(url) for url in article_urls]
+    article_results = await asyncio.gather(*coros)
     docs = []
-    for url, meta in matched_urls.items():
-        try:
-            article_text = await get_article_text(url)
-            if article_text and len(article_text) > 200:
-                docs.append(Document(
-                    page_content=article_text,
-                    metadata={
-                        "url": url,
-                        "matched_cse_title": meta["matched_cse_title"],
-                        "raw_cse_title": meta["raw_cse_title"]
-                    }
-                ))
-        except Exception as e:
-            logging.warning(f"❌ 기사 본문 추출 실패: {url} - {e}")
+    for url, article_text in article_results:
+        meta = matched_urls[url]
+        if article_text and len(article_text) > 200:
+            docs.append(Document(
+                page_content=article_text,
+                metadata={
+                    "url": url,
+                    "matched_cse_title": meta["matched_cse_title"],
+                    "raw_cse_title": meta["raw_cse_title"]
+                }
+            ))
     logging.info(f"📰 최종 크롤링 성공 문서 수: {len(docs)}")
     logging.info(f"[DEBUG] search_and_retrieve_docs: docs 길이={len(docs)}, claim='{claim}'")
     return docs
-
-def parse_channel_type(llm_output: str):
-    channel_type_match = re.search(r"채널 유형:\s*(.+)", llm_output)
-    reason_match = re.search(r"판단 근거:\s*(.+)", llm_output)
-    channel_type = channel_type_match.group(1).strip() if channel_type_match else "알 수 없음"
-    reason = reason_match.group(1).strip() if reason_match else "LLM 응답에서 판단 근거를 찾을 수 없습니다."
-    return channel_type, reason
 
 async def run_fact_check(youtube_url, faiss_partition_dirs):
     video_id = extract_video_id(youtube_url)
@@ -165,7 +166,6 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         logging.exception(f"주장 추출/정제 중 오류: {e}")
         return {"error": f"Failed to extract claims: {e}"}
 
-    # --- process_claim_step 함수는 내부 evidence도 병렬 ---
     async def process_claim_step(idx, claim):
         logging.info(f"[DEBUG] process_claim_step 진입: {idx} - '{claim}'")
         logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
@@ -186,10 +186,10 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         faiss_db.save_local(faiss_db_temp_path)
         logging.info(f"✅ 기사 문서 {len(docs)}개로 임시 FAISS DB 생성 완료")
 
+        validated_evidence = []
         fact_checker = build_factcheck_chain()
-
-        # **evidence LLM 판정 병렬화!**
-        async def run_fact_check_for_doc(doc):
+        # 각 뉴스 본문별 factcheck LLM도 "병렬" 처리
+        async def factcheck_doc(doc):
             try:
                 check_result = await fact_checker.ainvoke({
                     "claim": claim,
@@ -211,11 +211,9 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 logging.error(f"    - LLM 팩트체크 체인 실행 중 오류: {e}")
             return None
 
-        # ⚡ **모든 docs에 대해 병렬 LLM 호출**
-        validated_evidence_raw = await asyncio.gather(
-            *(run_fact_check_for_doc(doc) for doc in docs)
-        )
-        validated_evidence = [v for v in validated_evidence_raw if v]
+        factcheck_tasks = [factcheck_doc(doc) for doc in docs]
+        factcheck_results = await asyncio.gather(*factcheck_tasks)
+        validated_evidence = [res for res in factcheck_results if res]
 
         if os.path.exists(faiss_db_temp_path):
             shutil.rmtree(faiss_db_temp_path)
@@ -235,7 +233,6 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             "evidence": validated_evidence[:3]
         }
 
-    # --- claim별 팩트체크도 병렬 ---
     claim_tasks = [
         process_claim_step(idx, claim)
         for idx, claim in enumerate(claims_to_check)
@@ -262,3 +259,10 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         "channel_type": channel_type,
         "channel_type_reason": reason
     }
+
+def parse_channel_type(llm_output: str):
+    channel_type_match = re.search(r"채널 유형:\s*(.+)", llm_output)
+    reason_match = re.search(r"판단 근거:\s*(.+)", llm_output)
+    channel_type = channel_type_match.group(1).strip() if channel_type_match else "알 수 없음"
+    reason = reason_match.group(1).strip() if reason_match else "LLM 응답에서 판단 근거를 찾을 수 없습니다."
+    return channel_type, reason
