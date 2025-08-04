@@ -124,6 +124,7 @@ def extract_chosun_with_selenium(url: str):
     options.add_argument("--disable-gpu")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
+    
     driver = None
     try:
         logging.info(f"📰 Selenium으로 크롤링 시도: {url}")
