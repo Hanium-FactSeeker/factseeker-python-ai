@@ -55,7 +55,8 @@ async def search_and_retrieve_docs(claim):
     # 병렬 실행을 위한 내부 함수 정의
     async def process_single_article(item):
         url = item.get("link")
-        source_title = item.get("title")
+        raw_title = item.get("title", "")
+        source_title = clean_news_title(raw_title)
         snippet = item.get("snippet")
 
         if not url:
@@ -65,7 +66,7 @@ async def search_and_retrieve_docs(claim):
             # 기사 본문 추출 (await로 비동기)
             article_text = await get_article_text(url)
             if not article_text or len(article_text) < 200:
-                logging.warning(f"🪵 기사 너무 짧음 또는 없음: {url}")
+                logging.warning(f"기사 너무 짧음 또는 없음: {url}")
                 return None
 
             # get_or_build_faiss는 blocking 함수이므로 to_thread로 실행
