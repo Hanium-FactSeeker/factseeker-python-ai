@@ -38,6 +38,7 @@ embed_model = OpenAIEmbeddings(model="text-embedding-3-small", request_timeout=6
 async def search_and_retrieve_docs(claim):
     """
     주장(claim)에 대해 뉴스 검색을 수행하고, 관련성 있는 기사를 찾아 텍스트를 반환합니다.
+    병렬 처리로 get_article_text, get_or_build_faiss 를 동시에 실행합니다.
     """
     summarizer = build_claim_summarizer()
     try:
@@ -51,50 +52,48 @@ async def search_and_retrieve_docs(claim):
 
     search_results = await search_news_google_cs(summarized_query)
 
-    docs = []
-    retrieved_urls = set()
-
-    for item in search_results:
+    # 병렬 실행을 위한 내부 함수 정의
+    async def process_single_article(item):
         url = item.get("link")
         source_title = item.get("title")
         snippet = item.get("snippet")
 
-        if not url or url in retrieved_urls:
-            continue
+        if not url:
+            return None
 
         try:
-            # 기사 텍스트를 먼저 가져옴
+            # 기사 본문 추출 (await로 비동기)
             article_text = await get_article_text(url)
-
             if not article_text or len(article_text) < 200:
-                logging.warning(f"기사 텍스트 가져오기 실패 또는 너무 짧음: {url}")
-                continue
+                logging.warning(f"🪵 기사 너무 짧음 또는 없음: {url}")
+                return None
 
-            # 가져온 텍스트를 기반으로 FAISS DB를 로드하거나 새로 구축
-            faiss_db_result = await get_or_build_faiss( # <<< await 추가
-                url=url,
-                article_text=article_text, # 이제 article_text를 제공합니다.
-                embed_model=embed_model,
+            # get_or_build_faiss는 blocking 함수이므로 to_thread로 실행
+            faiss_db_result = await asyncio.to_thread(
+                get_or_build_faiss, url, article_text, embed_model
             )
 
-            # get_or_build_faiss가 FAISS DB 객체를 반환한다고 가정
-            if faiss_db_result:
-                # 기사 텍스트를 Document 객체로 변환
-                doc = Document(
-                    page_content=article_text,
-                    metadata={
-                        "source_title": source_title,
-                        "url": url,
-                        "snippet": snippet
-                    }
-                )
-                docs.append(doc)
-                retrieved_urls.add(url)
+            if not faiss_db_result:
+                return None
 
+            return Document(
+                page_content=article_text,
+                metadata={
+                    "source_title": source_title,
+                    "url": url,
+                    "snippet": snippet
+                }
+            )
         except Exception as e:
-            logging.error(f"기사 처리 중 오류 발생 ({url}): {e}")
-            continue
+            logging.warning(f"❌ 기사 처리 중 오류: {url} - {e}")
+            return None
 
+    # 병렬 실행 (최대 10개 정도까지만 현실적으로 추천)
+    tasks = [process_single_article(item) for item in search_results[:10]]
+    results = await asyncio.gather(*tasks)
+
+    # None 제외한 유효한 Document만 반환
+    docs = [doc for doc in results if doc]
     return docs
 
 

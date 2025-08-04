@@ -32,7 +32,8 @@ def download_from_s3_if_exists(s3_key: str, local_path: str) -> bool:
 
 def upload_to_s3(local_path: str, s3_key: str):
     try:
-        s3.upload_file(local_path, S3_BUCKET_NAME, s3_key)
+        with open(local_path, "rb") as f:
+            s3.upload_fileobj(f, S3_BUCKET_NAME, s3_key)
         logging.info(f"🆙 S3 업로드 완료: {s3_key}")
     except Exception as e:
         logging.error(f"❌ S3 업로드 실패: {s3_key} → {e}")
@@ -70,7 +71,7 @@ def get_or_build_faiss(url: str, article_text: str, embed_model) -> FAISS:
     with open(pkl_path, "wb") as f:
         pickle.dump(docs, f)
 
-    # 업로드
+    # S3에 업로드 (stream rewind 오류 방지용으로 upload_fileobj + open 사용)
     upload_to_s3(faiss_path, s3_faiss_key)
     upload_to_s3(pkl_path, s3_pkl_key)
 
