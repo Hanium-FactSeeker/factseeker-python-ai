@@ -89,6 +89,7 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
         except Exception as e:
             logging.warning(f"❌ 기사 본문 추출 실패: {url} - {e}")
     logging.info(f"📰 최종 크롤링 성공 문서 수: {len(docs)}")
+    logging.info(f"[DEBUG] search_and_retrieve_docs: docs 길이={len(docs)}, claim='{claim}'")
     return docs
 
 
@@ -152,6 +153,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         return {"error": f"Failed to extract claims: {e}"}
 
     async def process_claim_step(idx, claim):
+        logging.info(f"[DEBUG] process_claim_step 진입: {idx} - '{claim}'")
         logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
         docs = await search_and_retrieve_docs(claim, faiss_partition_dirs)
         if not docs:
