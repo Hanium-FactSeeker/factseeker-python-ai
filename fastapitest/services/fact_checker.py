@@ -153,6 +153,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         return {"error": f"Failed to extract claims: {e}"}
 
     async def process_claim_step(idx, claim):
+    try:
         logging.info(f"[DEBUG] process_claim_step 진입: {idx} - '{claim}'")
         logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
         docs = await search_and_retrieve_docs(claim, faiss_partition_dirs)
@@ -214,6 +215,12 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             "confidence_score": confidence_score,
             "evidence": validated_evidence[:3]
         }
+
+    except Exception as e:
+        # 이 부분만 추가!
+        logging.error(f"[ERROR] process_claim_step 실패: idx={idx}, claim='{claim}', 에러={e}", exc_info=True)
+        return None
+
 
     claim_tasks = [
         process_claim_step(idx, claim)
