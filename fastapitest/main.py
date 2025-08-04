@@ -45,10 +45,11 @@ async def startup_event():
     global FAISS_PARTITION_DIRS
     FAISS_PARTITION_DIRS = []
     for i in range(10):
-        local_dir = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}")
-        if os.path.exists(os.path.join(local_dir, "index.faiss")):
-            FAISS_PARTITION_DIRS.append(local_dir)
-    logging.info(f"✅ 전체 FAISS 파티션 로드 경로: {FAISS_PARTITION_DIRS}")
+        faiss_path = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}.faiss")
+        pkl_path = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}.pkl")
+        if os.path.exists(faiss_path):
+            FAISS_PARTITION_DIRS.append(faiss_path)   # 혹은 append((faiss_path, pkl_path))로 관리
+
 
 class FactCheckRequest(BaseModel):
     youtube_url: str
