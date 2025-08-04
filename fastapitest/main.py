@@ -39,11 +39,17 @@ embed_model = OpenAIEmbeddings(
 # FAISS DB 및 캐시 디렉토리 생성 (서버 시작 시)
 @app.on_event("startup")
 async def startup_event():
-    
     logging.info("--- FastAPI 애플리케이션 시작 ---")
-    os.makedirs(CHUNK_CACHE_DIR, exist_ok=True)
 
-    await preload_faiss_from_existing_s3()
+    # 본문 임베딩 캐시 프리로드
+    await preload_faiss_from_existing_s3("article_faiss_cache/")
+
+    # (선택 사항) 파티션 전체를 순회하면서 로딩
+    for i in range(10):
+        prefix = f"feature_faiss_db_openai_partition/partition_{i}/"
+        await preload_faiss_from_existing_s3(prefix)
+
+    logging.info("✅ 전체 FAISS 프리로드 완료")
 
 class FactCheckRequest(BaseModel):
     youtube_url: str
