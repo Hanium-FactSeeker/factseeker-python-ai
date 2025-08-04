@@ -262,7 +262,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
 def parse_channel_type(llm_output: str):
     channel_type_match = re.search(r"채널 유형:\s*(.+)", llm_output)
-    reason_match = re.search(r"판단 근거:\s*(.+)", llm_output)
+    reason_match = re.search(r"분류 근거:\s*(.+)", llm_output)
     channel_type = channel_type_match.group(1).strip() if channel_type_match else "알 수 없음"
     reason = reason_match.group(1).strip() if reason_match else "LLM 응답에서 판단 근거를 찾을 수 없습니다."
     return channel_type, reason
