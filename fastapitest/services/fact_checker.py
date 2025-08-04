@@ -277,6 +277,7 @@ async def run_fact_check(youtube_url):
 
     return {
         "video_id": video_id,
+        "video_url": youtube_url,
         "video_total_confidence_score": avg_score,
         "claims": outputs,
         "summary": summary,

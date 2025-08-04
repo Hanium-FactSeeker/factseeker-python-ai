@@ -128,7 +128,8 @@ def extract_chosun_with_selenium(url: str):
     try:
         logging.info(f"📰 Selenium으로 크롤링 시도: {url}")
         # Service 객체를 사용하여 driver 생성
-        driver = webdriver.Chrome(options=options)
+        service = Service("/usr/local/bin/chromedriver")
+        driver = webdriver.Chrome(service=service, options=options)
         driver.get(url)
         wait = WebDriverWait(driver, 10)
         
