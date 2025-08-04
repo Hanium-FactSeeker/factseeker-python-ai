@@ -19,7 +19,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# 캐시 디렉토리 클린업
 def clean_local_cache_dir():
     logging.info(f"🧹 로컬 캐시 디렉토리 ({CHUNK_CACHE_DIR}) 정리 시작")
     if os.path.exists(CHUNK_CACHE_DIR):
@@ -29,7 +28,7 @@ def clean_local_cache_dir():
         except OSError as e:
             logging.error(f"❌ 캐시 디렉토리 삭제 실패: {e}")
 
-# 전역 FAISS 파티션 경로 리스트 (폴더명만 저장!!)
+# 전역 FAISS 파티션 경로 리스트 (폴더별로 저장!)
 FAISS_PARTITION_DIRS = []
 
 @app.on_event("startup")
@@ -41,17 +40,17 @@ async def startup_event():
     for i in range(10):
         prefix = f"feature_faiss_db_openai_partition/partition_{i}/"
         await preload_faiss_from_existing_s3(prefix)
-    # 파티션 경로 자동 수집 (폴더명만 저장)
+    # 파티션 경로 자동 수집 (폴더명만 저장, 실제 partition_0~9만!)
     global FAISS_PARTITION_DIRS
     FAISS_PARTITION_DIRS = []
     for i in range(10):
-        faiss_path = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}.faiss")
-        pkl_path = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}.pkl")
+        faiss_dir = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}")  # 폴더 경로!
+        faiss_path = os.path.join(faiss_dir, "index.faiss")
+        pkl_path = os.path.join(faiss_dir, "index.pkl")
         logging.info(f"[DEBUG] 체크: {faiss_path} / {os.path.exists(faiss_path)}")
         logging.info(f"[DEBUG] 체크: {pkl_path} / {os.path.exists(pkl_path)}")
-        # 반드시 폴더(str)만 저장!
         if os.path.exists(faiss_path) and os.path.exists(pkl_path):
-            FAISS_PARTITION_DIRS.append(CHUNK_CACHE_DIR)
+            FAISS_PARTITION_DIRS.append(faiss_dir)  # 반드시 폴더(str)만!
     logging.info(f"✅ 전체 FAISS 파티션 로드 경로: {FAISS_PARTITION_DIRS}")
 
 class FactCheckRequest(BaseModel):
