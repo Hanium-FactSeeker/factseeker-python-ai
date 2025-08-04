@@ -1,21 +1,12 @@
 import os
 import asyncio
-import json
-import faiss
-from shutil import rmtree # shutil 임포트 추가
-from langchain.docstore.document import Document
+import logging
+from shutil import rmtree
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-
-# 서비스 로직 임포트
-from services.fact_checker import run_fact_check
 from core.faiss_manager import CHUNK_CACHE_DIR
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from core.lambdas import clean_news_title, search_news_google_cs # 필요한 유틸리티 추가
-import logging
-from core.faiss_manager import get_or_build_faiss
 from core.preload_s3_faiss import preload_faiss_from_existing_s3
+from services.fact_checker import run_fact_check
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,67 +19,48 @@ app = FastAPI(
     version="1.0.0"
 )
 
-embed_model = OpenAIEmbeddings(
-    model="text-embedding-3-small",
-    request_timeout=60,
-    max_retries=5,
-    chunk_size=500
-)
-
-# 로컬 캐시 디렉토리를 정리하는 함수 추가
+# 캐시 디렉토리 클린업
 def clean_local_cache_dir():
-    """CHUNK_CACHE_DIR에 있는 모든 파일과 폴더를 삭제합니다."""
     logging.info(f"🧹 로컬 캐시 디렉토리 ({CHUNK_CACHE_DIR}) 정리 시작")
     if os.path.exists(CHUNK_CACHE_DIR):
         try:
-            # os.makedirs를 사용한 디렉토리 생성은 추후에 preload 함수에서 수행
             rmtree(CHUNK_CACHE_DIR)
             logging.info("✅ 캐시 디렉토리 정리 완료")
         except OSError as e:
             logging.error(f"❌ 캐시 디렉토리 삭제 실패: {e}")
-    else:
-        logging.info("✅ 캐시 디렉토리가 이미 비어있거나 존재하지 않습니다.")
 
-# FAISS DB 및 캐시 디렉토리 생성 (서버 시작 시)
+# 전역 FAISS 파티션 경로 리스트
+FAISS_PARTITION_DIRS = []
+
 @app.on_event("startup")
 async def startup_event():
     logging.info("--- FastAPI 애플리케이션 시작 ---")
-
-    # 서버 시작 시 가장 먼저 캐시 디렉토리를 정리합니다.
     clean_local_cache_dir()
-
-    # 본문 임베딩 캐시 프리로드
     await preload_faiss_from_existing_s3("article_faiss_cache/")
-
-    # (선택 사항) 파티션 전체를 순회하면서 로딩
+    # 파티션별 전체 프리로드
     for i in range(10):
         prefix = f"feature_faiss_db_openai_partition/partition_{i}/"
         await preload_faiss_from_existing_s3(prefix)
-
-    logging.info("✅ 전체 FAISS 프리로드 완료")
-
+    # 파티션 경로 자동 수집
+    global FAISS_PARTITION_DIRS
+    FAISS_PARTITION_DIRS = []
+    for i in range(10):
+        local_dir = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}")
+        if os.path.exists(os.path.join(local_dir, "index.faiss")):
+            FAISS_PARTITION_DIRS.append(local_dir)
+    logging.info(f"✅ 전체 FAISS 파티션 로드 경로: {FAISS_PARTITION_DIRS}")
 
 class FactCheckRequest(BaseModel):
     youtube_url: str
 
-class FactCheckResponse(BaseModel):
-    video_id: str
-    video_total_confidence_score: int
-    claims: list
-
-
 @app.post("/fact-check")
 async def perform_fact_check(request: FactCheckRequest):
-    """
-    제공된 유튜브 URL에 대해 팩트체크를 수행합니다.
-    """
     logging.info(f"--- 팩트체크 요청 수신: {request.youtube_url} ---")
     try:
-        logging.info("팩트체크 시작...")
-        result = await run_fact_check(request.youtube_url)
+        result = await run_fact_check(request.youtube_url, FAISS_PARTITION_DIRS)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
-        return result  # dict 전체 그대로 반환!
+        return result
     except Exception as e:
         logging.exception(f"API 처리 중 예외 발생: {e}")
         raise HTTPException(status_code=500, detail=f"팩트체크 처리 중 내부 서버 오류가 발생했습니다: {e}")
