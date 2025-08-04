@@ -10,7 +10,6 @@ from langchain.docstore.document import Document
 from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-
 CHUNK_CACHE_DIR = "article_faiss_cache"
 S3_BUCKET_NAME = "factseeker-faiss-db"
 S3_PREFIX = "article_faiss_cache/"
@@ -32,47 +31,51 @@ def download_from_s3_if_exists(s3_key: str, local_path: str) -> bool:
 
 def upload_to_s3(local_path: str, s3_key: str):
     try:
-        with open(local_path, "rb") as f:
-            s3.upload_fileobj(f, S3_BUCKET_NAME, s3_key)
+        s3.upload_file(local_path, S3_BUCKET_NAME, s3_key)
         logging.info(f"🆙 S3 업로드 완료: {s3_key}")
     except Exception as e:
         logging.error(f"❌ S3 업로드 실패: {s3_key} → {e}")
 
 def get_or_build_faiss(url: str, article_text: str, embed_model) -> FAISS:
     hashed = sha256_of(url)
-    faiss_path = os.path.join(CHUNK_CACHE_DIR, f"{hashed}.faiss")
+    faiss_dir = os.path.join(CHUNK_CACHE_DIR, hashed)
+    index_file = os.path.join(faiss_dir, "index.faiss")
     pkl_path = os.path.join(CHUNK_CACHE_DIR, f"{hashed}.pkl")
     s3_faiss_key = f"{S3_PREFIX}{hashed}.faiss"
     s3_pkl_key = f"{S3_PREFIX}{hashed}.pkl"
 
     # ✅ 로컬에 없으면 S3에서 다운로드 시도
-    if not os.path.exists(faiss_path) or not os.path.exists(pkl_path):
+    if not os.path.exists(index_file) or not os.path.exists(pkl_path):
         logging.info("📦 로컬 캐시 없음 → S3에서 로딩 시도")
         start = time.time()
-        download_from_s3_if_exists(s3_faiss_key, faiss_path)
+
+        os.makedirs(faiss_dir, exist_ok=True)
+        download_from_s3_if_exists(s3_faiss_key, index_file)
         download_from_s3_if_exists(s3_pkl_key, pkl_path)
+
         elapsed = time.time() - start
         logging.info(f"⏱️ [S3 다운로드] 소요 시간: {elapsed:.2f}초")
 
-    # ✅ 다운로드되었거나 원래부터 로컬에 있으면 로드
-    if os.path.exists(faiss_path) and os.path.exists(pkl_path):
+    # ✅ 캐시 로드
+    if os.path.exists(index_file) and os.path.exists(pkl_path):
         logging.info("✅ FAISS 캐시 로드 완료")
         with open(pkl_path, "rb") as f:
-            stored_texts = pickle.load(f)
-        return FAISS.load_local(faiss_path, embed_model, stored_texts)
+            stored_docs = pickle.load(f)
+        return FAISS.load_local(faiss_dir, embed_model, stored_docs)
 
-    # ❌ 둘 다 없으면 새로 생성
+    # ❌ 새로 생성
     logging.info("⚙️ FAISS 인덱스 새로 생성 중...")
     splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100)
     chunks = splitter.split_text(article_text)
     docs = [Document(page_content=chunk, metadata={"url": url}) for chunk in chunks]
     db = FAISS.from_documents(docs, embed_model)
-    db.save_local(faiss_path)
+
+    db.save_local(faiss_dir)
+
     with open(pkl_path, "wb") as f:
         pickle.dump(docs, f)
 
-    # S3에 업로드 (stream rewind 오류 방지용으로 upload_fileobj + open 사용)
-    upload_to_s3(faiss_path, s3_faiss_key)
+    upload_to_s3(index_file, s3_faiss_key)
     upload_to_s3(pkl_path, s3_pkl_key)
 
     return db
