@@ -45,8 +45,11 @@ def get_or_build_faiss(url: str, article_text: str, embed_model) -> FAISS:
     # ✅ 로컬에 없으면 S3에서 다운로드 시도
     if not os.path.exists(faiss_path) or not os.path.exists(pkl_path):
         logging.info("📦 로컬 캐시 없음 → S3에서 로딩 시도")
+        start = time.time()
         download_from_s3_if_exists(s3_faiss_key, faiss_path)
         download_from_s3_if_exists(s3_pkl_key, pkl_path)
+        elapsed = time.time() - start
+        logging.info(f"⏱️ [S3 다운로드] 소요 시간: {elapsed:.2f}초")
 
     # ✅ 다운로드되었거나 원래부터 로컬에 있으면 로드
     if os.path.exists(faiss_path) and os.path.exists(pkl_path):
