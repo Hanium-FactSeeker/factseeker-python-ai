@@ -53,10 +53,17 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
 
     matched_urls = {}
     for idx, faiss_dir in enumerate(faiss_partition_dirs):
-        if not os.path.exists(os.path.join(faiss_dir, "partition_0.faiss")):
+        faiss_index_path = os.path.join(faiss_dir, "index.faiss")
+        faiss_pkl_path = os.path.join(faiss_dir, "index.pkl")
+        # index.faiss, index.pkl 파일이 있는 파티션만
+        if not (os.path.exists(faiss_index_path) and os.path.exists(faiss_pkl_path)):
             continue
         try:
-            title_faiss_db = FAISS.load_local(faiss_dir, embeddings=embed_model, allow_dangerous_deserialization=True)
+            title_faiss_db = FAISS.load_local(
+                faiss_dir,
+                embeddings=embed_model,
+                allow_dangerous_deserialization=True
+            )
             D, I = title_faiss_db.index.search(np.array(cse_title_embs, dtype=np.float32), k=1)
             for j, dist in enumerate(D.flatten()):
                 if dist < DISTANCE_THRESHOLD:
