@@ -124,14 +124,11 @@ def extract_chosun_with_selenium(url: str):
     options.add_argument("--disable-gpu")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # EC2 환경에 맞는 Chromedriver 경로를 Service 객체로 전달
-    service = Service(executable_path='/home/ubuntu/chromedriver-linux64/chromedriver')
-    
     driver = None
     try:
         logging.info(f"📰 Selenium으로 크롤링 시도: {url}")
         # Service 객체를 사용하여 driver 생성
-        driver = webdriver.Chrome(service=service, options=options)
+        driver = webdriver.Chrome(options=options)
         driver.get(url)
         wait = WebDriverWait(driver, 10)
         
