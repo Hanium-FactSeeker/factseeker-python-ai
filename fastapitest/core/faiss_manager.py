@@ -62,9 +62,8 @@ def get_or_build_faiss(url: str, article_text: str, embed_model) -> FAISS:
         return FAISS.load_local(
             local_dir=folder_path,
             embeddings=embed_model,
-            allow_dangerous_deserialization=True  # 🔐 이거 필수
+            allow_dangerous_deserialization=True
         )
-
 
     # ❌ 둘 다 없으면 새로 생성
     logging.info("⚙️ FAISS 인덱스 새로 생성 중...")
