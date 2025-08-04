@@ -14,7 +14,8 @@ from langchain_community.vectorstores import FAISS
 from core.lambdas import clean_news_title, search_news_google_cs # 필요한 유틸리티 추가
 import logging
 from core.faiss_manager import get_or_build_faiss
-import time
+from core.preload_s3_faiss import preload_faiss_from_existing_s3
+
 
 
 logging.basicConfig(
@@ -42,19 +43,7 @@ async def startup_event():
     logging.info("--- FastAPI 애플리케이션 시작 ---")
     os.makedirs(CHUNK_CACHE_DIR, exist_ok=True)
 
-    PRELOAD_URLS = [
-    "https://www.chosun.com/politics/2025/08/01/article1",
-    "https://www.khan.co.kr/article/202507111106001",
-    # 추가 가능
-    ]
-
-    for url in PRELOAD_URLS:
-        try:
-            dummy_text = "프리로드용 텍스트"  # 실제 사용되지 않음 (S3에만 있으면 됨)
-            get_or_build_faiss(url, dummy_text, embed_model)
-        except Exception as e:
-            logging.warning(f"⚠️ 프리로드 실패: {url} → {e}")
-    logging.info("✅ FAISS 프리로드 완료")
+    await preload_faiss_from_existing_s3()
 
 class FactCheckRequest(BaseModel):
     youtube_url: str
