@@ -228,6 +228,8 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
     classification = await classifier.ainvoke({"transcript": transcript})
     channel_type, reason = parse_channel_type(classification.content)
 
+    logging.info(f"[DEBUG] 리턴 claims 길이: {len(outputs)}, claims: {outputs}")
+
     return {
         "video_id": video_id,
         "video_url": youtube_url,
