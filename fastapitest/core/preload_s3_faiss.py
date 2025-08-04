@@ -40,18 +40,20 @@ async def preload_faiss_from_existing_s3(s3_prefix):
     logging.info(f"🔢 프리로드 대상 인덱스 개수: {len(faiss_keys)}개")
 
     for faiss_key in faiss_keys:
-        if not faiss_key.endswith(".faiss"):
-            continue
-
-        # 경로에서 폴더 이름 추출 (해시값 or partition 이름)
-        dir_name = os.path.dirname(faiss_key).replace(s3_prefix, "").strip("/")
-        pkl_key = f"{s3_prefix}{dir_name}/index.pkl"
-
+        # S3 키에서 폴더 이름 (예: 'partition_0')을 추출하여 로컬 파일 이름의 접두사로 사용
+        dir_name = os.path.basename(os.path.dirname(faiss_key))
+        
+        # S3에서 pkl 파일의 키를 올바르게 생성
+        pkl_key = os.path.join(os.path.dirname(faiss_key), "index.pkl")
+        
+        # 로컬 파일 경로를 올바르게 생성 (예: '.../cache/partition_0.faiss')
         faiss_path = os.path.join(CHUNK_CACHE_DIR, f"{dir_name}.faiss")
         pkl_path = os.path.join(CHUNK_CACHE_DIR, f"{dir_name}.pkl")
 
         start = time.time()
+        # S3 키를 faiss_key로, 로컬 경로를 faiss_path로 지정
         faiss_ok = download_from_s3_if_exists(faiss_key, faiss_path)
+        # S3 키를 pkl_key로, 로컬 경로를 pkl_path로 지정
         pkl_ok = download_from_s3_if_exists(pkl_key, pkl_path)
         elapsed = time.time() - start
 
