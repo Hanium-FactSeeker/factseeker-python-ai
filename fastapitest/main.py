@@ -29,7 +29,7 @@ def clean_local_cache_dir():
         except OSError as e:
             logging.error(f"❌ 캐시 디렉토리 삭제 실패: {e}")
 
-# 전역 FAISS 파티션 경로 리스트
+# 전역 FAISS 파티션 경로 리스트 (폴더명만 저장!!)
 FAISS_PARTITION_DIRS = []
 
 @app.on_event("startup")
@@ -41,7 +41,7 @@ async def startup_event():
     for i in range(10):
         prefix = f"feature_faiss_db_openai_partition/partition_{i}/"
         await preload_faiss_from_existing_s3(prefix)
-    # 파티션 경로 자동 수집
+    # 파티션 경로 자동 수집 (폴더명만 저장)
     global FAISS_PARTITION_DIRS
     FAISS_PARTITION_DIRS = []
     for i in range(10):
@@ -49,12 +49,10 @@ async def startup_event():
         pkl_path = os.path.join(CHUNK_CACHE_DIR, f"partition_{i}.pkl")
         logging.info(f"[DEBUG] 체크: {faiss_path} / {os.path.exists(faiss_path)}")
         logging.info(f"[DEBUG] 체크: {pkl_path} / {os.path.exists(pkl_path)}")
+        # 반드시 폴더(str)만 저장!
         if os.path.exists(faiss_path) and os.path.exists(pkl_path):
-            # ✅ tuple이 아니라 경로(str)만 append!
-            FAISS_PARTITION_DIRS.append(os.path.dirname(faiss_path))
+            FAISS_PARTITION_DIRS.append(CHUNK_CACHE_DIR)
     logging.info(f"✅ 전체 FAISS 파티션 로드 경로: {FAISS_PARTITION_DIRS}")
-
-
 
 class FactCheckRequest(BaseModel):
     youtube_url: str
