@@ -99,6 +99,12 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
     logging.info(f"[DEBUG] search_and_retrieve_docs: docs 길이={len(docs)}, claim='{claim}'")
     return docs
 
+def parse_channel_type(llm_output: str):
+    channel_type_match = re.search(r"채널 유형:\s*(.+)", llm_output)
+    reason_match = re.search(r"판단 근거:\s*(.+)", llm_output)
+    channel_type = channel_type_match.group(1).strip() if channel_type_match else "알 수 없음"
+    reason = reason_match.group(1).strip() if reason_match else "LLM 응답에서 판단 근거를 찾을 수 없습니다."
+    return channel_type, reason
 
 async def run_fact_check(youtube_url, faiss_partition_dirs):
     video_id = extract_video_id(youtube_url)
@@ -159,6 +165,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         logging.exception(f"주장 추출/정제 중 오류: {e}")
         return {"error": f"Failed to extract claims: {e}"}
 
+    # --- process_claim_step 함수는 내부 evidence도 병렬 ---
     async def process_claim_step(idx, claim):
         logging.info(f"[DEBUG] process_claim_step 진입: {idx} - '{claim}'")
         logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
@@ -179,10 +186,10 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         faiss_db.save_local(faiss_db_temp_path)
         logging.info(f"✅ 기사 문서 {len(docs)}개로 임시 FAISS DB 생성 완료")
 
-        retriever = faiss_db.as_retriever(search_kwargs={"k": 5})
-        validated_evidence = []
         fact_checker = build_factcheck_chain()
-        for i, doc in enumerate(docs):
+
+        # **evidence LLM 판정 병렬화!**
+        async def run_fact_check_for_doc(doc):
             try:
                 check_result = await fact_checker.ainvoke({
                     "claim": claim,
@@ -194,15 +201,21 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 justification = re.search(r"간단한 설명: (.+)", result_content)
                 if relevance and fact_check_result and justification:
                     if "예" in relevance.group(1):
-                        validated_evidence.append({
+                        return {
                             "url": doc.metadata.get("url"),
                             "relevance": "yes",
                             "fact_check_result": fact_check_result.group(1).strip(),
                             "justification": justification.group(1).strip()
-                        })
-                        logging.info(f"    - 근거 확보 ({i+1}): {doc.metadata.get('url')}")
+                        }
             except Exception as e:
                 logging.error(f"    - LLM 팩트체크 체인 실행 중 오류: {e}")
+            return None
+
+        # ⚡ **모든 docs에 대해 병렬 LLM 호출**
+        validated_evidence_raw = await asyncio.gather(
+            *(run_fact_check_for_doc(doc) for doc in docs)
+        )
+        validated_evidence = [v for v in validated_evidence_raw if v]
 
         if os.path.exists(faiss_db_temp_path):
             shutil.rmtree(faiss_db_temp_path)
@@ -222,6 +235,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             "evidence": validated_evidence[:3]
         }
 
+    # --- claim별 팩트체크도 병렬 ---
     claim_tasks = [
         process_claim_step(idx, claim)
         for idx, claim in enumerate(claims_to_check)
@@ -248,10 +262,3 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         "channel_type": channel_type,
         "channel_type_reason": reason
     }
-
-def parse_channel_type(llm_output: str):
-    channel_type_match = re.search(r"채널 유형:\s*(.+)", llm_output)
-    reason_match = re.search(r"판단 근거:\s*(.+)", llm_output)
-    channel_type = channel_type_match.group(1).strip() if channel_type_match else "알 수 없음"
-    reason = reason_match.group(1).strip() if reason_match else "LLM 응답에서 판단 근거를 찾을 수 없습니다."
-    return channel_type, reason
