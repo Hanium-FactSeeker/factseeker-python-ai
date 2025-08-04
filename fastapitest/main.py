@@ -50,7 +50,8 @@ async def startup_event():
         logging.info(f"[DEBUG] 체크: {faiss_path} / {os.path.exists(faiss_path)}")
         logging.info(f"[DEBUG] 체크: {pkl_path} / {os.path.exists(pkl_path)}")
         if os.path.exists(faiss_path) and os.path.exists(pkl_path):
-            FAISS_PARTITION_DIRS.append((faiss_path, pkl_path))
+            # ✅ tuple이 아니라 경로(str)만 append!
+            FAISS_PARTITION_DIRS.append(os.path.dirname(faiss_path))
     logging.info(f"✅ 전체 FAISS 파티션 로드 경로: {FAISS_PARTITION_DIRS}")
 
 
