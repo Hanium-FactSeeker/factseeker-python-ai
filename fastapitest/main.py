@@ -2,6 +2,7 @@ import os
 import asyncio
 import json
 import faiss
+from shutil import rmtree # shutil 임포트 추가
 from langchain.docstore.document import Document
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -15,8 +16,6 @@ from core.lambdas import clean_news_title, search_news_google_cs # 필요한 유
 import logging
 from core.faiss_manager import get_or_build_faiss
 from core.preload_s3_faiss import preload_faiss_from_existing_s3
-
-
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,10 +35,27 @@ embed_model = OpenAIEmbeddings(
     chunk_size=500
 )
 
+# 로컬 캐시 디렉토리를 정리하는 함수 추가
+def clean_local_cache_dir():
+    """CHUNK_CACHE_DIR에 있는 모든 파일과 폴더를 삭제합니다."""
+    logging.info(f"🧹 로컬 캐시 디렉토리 ({CHUNK_CACHE_DIR}) 정리 시작")
+    if os.path.exists(CHUNK_CACHE_DIR):
+        try:
+            # os.makedirs를 사용한 디렉토리 생성은 추후에 preload 함수에서 수행
+            rmtree(CHUNK_CACHE_DIR)
+            logging.info("✅ 캐시 디렉토리 정리 완료")
+        except OSError as e:
+            logging.error(f"❌ 캐시 디렉토리 삭제 실패: {e}")
+    else:
+        logging.info("✅ 캐시 디렉토리가 이미 비어있거나 존재하지 않습니다.")
+
 # FAISS DB 및 캐시 디렉토리 생성 (서버 시작 시)
 @app.on_event("startup")
 async def startup_event():
     logging.info("--- FastAPI 애플리케이션 시작 ---")
+
+    # 서버 시작 시 가장 먼저 캐시 디렉토리를 정리합니다.
+    clean_local_cache_dir()
 
     # 본문 임베딩 캐시 프리로드
     await preload_faiss_from_existing_s3("article_faiss_cache/")
@@ -50,6 +66,7 @@ async def startup_event():
         await preload_faiss_from_existing_s3(prefix)
 
     logging.info("✅ 전체 FAISS 프리로드 완료")
+
 
 class FactCheckRequest(BaseModel):
     youtube_url: str
@@ -71,7 +88,7 @@ async def perform_fact_check(request: FactCheckRequest):
         result = await run_fact_check(request.youtube_url)
         if "error" in result:
             raise HTTPException(status_code=400, detail=result["error"])
-        return result   # dict 전체 그대로 반환!
+        return result  # dict 전체 그대로 반환!
     except Exception as e:
         logging.exception(f"API 처리 중 예외 발생: {e}")
         raise HTTPException(status_code=500, detail=f"팩트체크 처리 중 내부 서버 오류가 발생했습니다: {e}")
