@@ -38,12 +38,9 @@ def extract_video_id(url: str):
             video_id = match.group(1)
             logging.info(f"[디버깅] URL에서 추출된 video_id: {video_id}")
             return video_id
-
     except Exception as e:
-        logging.exception(f"extract_video_id 오류: {e}")
-
-    logging.error("❌ video_id 추출 실패")
-    return None
+        logging.error(f"유튜브 video_id 추출 실패: {e}")
+        return None
 
 def fetch_youtube_transcript(video_url):
     """
@@ -116,41 +113,44 @@ def fetch_youtube_transcript(video_url):
                 logging.info(f"🗑️ 임시 파일 삭제 완료: {file_path}")
 
 
-def extract_chosun_with_selenium(url):
+def extract_chosun_with_selenium(url: str):
     """
-    Selenium을 사용하여 조선일보 기사 본문을 추출합니다.
-    (로컬 테스트 환경에 맞게 ChromeDriver 경로 설정 필요)
+    동기적으로 Selenium을 사용하여 조선일보 기사 본문을 추출합니다.
     """
     options = Options()
-    options.add_argument("--headless")  # 브라우저 안 띄우고 실행
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")  # GPU 사용 비활성화 (일부 환경에서 필요)
-    options.add_argument("--window-size=1920,1080")  # 창 크기 설정
+    options.add_argument("--disable-gpu")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     driver = None
     try:
-        driver = webdriver.Chrome(options=options)  # PATH에 chromedriver가 있다고 가정
-        logging.info(f"🌐 Selenium으로 URL 접속 시도: {url}")
+        logging.info(f"📰 Selenium으로 크롤링 시도: {url}")
+        driver = webdriver.Chrome(options=options)
         driver.get(url)
-        time.sleep(3)  # JS 렌더링 기다림 (충분히 기다려야 함)
-
+        wait = WebDriverWait(driver, 10)
+        
+        # 조선일보 주간조선 및 일반 기사 본문 선택자
+        article_selector = "article#article-view-content-div, article.layout__article-main section.article-body"
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, article_selector)))
+        
         soup = BeautifulSoup(driver.page_source, 'html.parser')
-
         article_content = []
-
         article_body_container = soup.select_one('article.layout__article-main section.article-body')
         if not article_body_container:
-            article_body_container = soup.select_one('section.article-body')
-            
+            article_body_container = soup.select_one('article#article-view-content-div')
+        
         if article_body_container:
             paragraphs = article_body_container.find_all("p")
-            for i, p in enumerate(paragraphs):
+            for p in paragraphs:
                 text = p.get_text(strip=True)
                 if text and not any(k in text for k in ["chosun.com", "기자", "Copyright", "무단전재"]):
                     article_content.append(text)
             full_text = "\n".join(article_content)
+            
             if full_text and len(full_text) > 100:
+                logging.info("✅ Selenium으로 본문 추출 성공")
                 return full_text
             else:
                 logging.warning("Selenium으로 본문을 찾았으나 내용이 너무 짧거나 비어있습니다.")
@@ -158,99 +158,110 @@ def extract_chosun_with_selenium(url):
         else:
             logging.warning("Selenium에서도 조선일보 본문 요소를 찾지 못했습니다.")
             return ""
+            
+    except (TimeoutException, NoSuchElementException) as e:
+        logging.error(f"❌ Selenium 크롤링 중 요소 탐색 실패 또는 타임아웃: {e}")
+        return None
     except Exception as e:
-        logging.exception(f"Selenium 크롤링 중 오류 발생 ({url}): {e}")
-        return ""
+        logging.exception(f"❌ Selenium 크롤링 중 오류 발생: {e}")
+        return None
     finally:
         if driver:
             driver.quit()
 
-
-def get_article_text(url):
+async def get_article_text(url: str):
     """
-    주어진 URL에서 뉴스 기사 텍스트를 크롤링하고 파싱합니다.
-    조선일보에 대한 특별 처리 로직을 포함합니다.
+    비동기적으로 기사 본문을 가져오는 함수.
+    aiohttp -> newspaper -> BeautifulSoup -> Selenium 순서로 폴백을 시도합니다.
     """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-
+    logging.info(f"📰 비동기로 기사 텍스트 가져오기 시도: {url}")
     parsed_url = urlparse(url)
     clean_url = urlunparse(parsed_url._replace(query='', fragment=''))
 
-    # 1. 조선일보에 대한 Selenium 특별 처리
-    if "chosun.com" in parsed_url.netloc:
-        selenium_text = extract_chosun_with_selenium(clean_url)
-        if selenium_text and len(selenium_text) > 300:
-            return selenium_text
-        else:
-            logging.warning(f"Selenium으로 조선일보 본문 추출 실패 또는 내용 부족. newspaper 및 requests 폴백 시도.")
-
-    # 2. newspaper 라이브러리를 사용한 일반적인 크롤링 시도
+    # 1. aiohttp + newspaper 시도
     try:
-        article = Article(clean_url, language="ko", headers=headers)
-        article.download()
-        article.parse()
-        newspaper_text = article.text
-        
-        if newspaper_text and len(newspaper_text) > 300:
-            return newspaper_text
-        else:
-            logging.warning(f"newspaper 크롤링 결과가 불충분함 ({len(newspaper_text)}자). requests + BeautifulSoup 폴백 시도: {clean_url}")
-
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(clean_url, timeout=30) as response:
+                response.raise_for_status()
+                html_content = await response.text()
+                
+                article = Article(clean_url, language='ko')
+                article.download(input_html=html_content)
+                article.parse()
+                
+                if article.text and len(article.text) > 300:
+                    logging.info(f"✅ newspaper로 기사 텍스트 추출 완료 ({len(article.text)}자): {url}")
+                    return article.text
+                else:
+                    logging.warning(f"⚠️ newspaper 크롤링 결과가 불충분함. BeautifulSoup 폴백 시도: {url}")
+    except aiohttp.ClientError as e:
+        logging.warning(f"⚠️ aiohttp 클라이언트 오류 발생. 다음 방법 시도: {url} -> {e}")
     except Exception as e:
-        logging.exception(f"newspaper 크롤링 실패 ({clean_url}): {e}. requests + BeautifulSoup 폴백 시도.")
-    
-    # 3. requests와 BeautifulSoup를 사용한 마지막 폴백
+        logging.warning(f"⚠️ newspaper 크롤링 실패. 다음 방법 시도: {url} -> {e}")
+
+    # 2. requests + BeautifulSoup 폴백 시도
     try:
-        response = requests.get(clean_url, headers=headers, timeout=10)
+        logging.warning(f"⚠️ requests+BeautifulSoup으로 본문 추출 재시도: {url}")
+        response = requests.get(clean_url, headers=headers, timeout=30)
         response.raise_for_status()
-
         soup = BeautifulSoup(response.text, 'html.parser')
+        
         article_content = []
-
-        # 조선일보이거나 다른 언론사라도 본문 선택자 로직 재시도
         if "chosun.com" in parsed_url.netloc:
-            article_body_section = soup.select_one('section.article-body')  
+            # 조선일보에 대한 특정 선택자
+            article_body_section = soup.select_one('section.article-body') or soup.select_one('article#article-view-content-div')
             if article_body_section:
-                paragraphs = article_body_section.find_all('p')  
+                paragraphs = article_body_section.find_all('p')
                 for p in paragraphs:
                     text = p.get_text(strip=True)
-                    if text and not any(keyword in text for keyword in ["chosun.com", "기자", "Copyright", "무단전재"]):
+                    if text and not any(k in text for k in ["chosun.com", "기자", "Copyright", "무단전재"]):
                         article_content.append(text)
-                
-        # 일반적인 언론사 본문 선택자
         else:
+            # 일반적인 언론사 본문 선택자
             body_elements = soup.select('div.article_content, div#articleBodyContents, div#article_body, div.news_content, article.article_view, div.view_content')
             for elem in body_elements:
                 text = elem.get_text(separator='\n', strip=True)
                 if text:
                     article_content.append(text)
-        
-        full_text = '\n'.join([c for c in article_content if c]) # None 값 제거
-        if len(full_text) > 300:
+
+        full_text = '\n'.join([c for c in article_content if c])
+        if full_text and len(full_text) > 300:
+            logging.info(f"✅ requests+BeautifulSoup으로 본문 추출 완료 ({len(full_text)}자): {url}")
             return full_text
         else:
-            logging.warning(f"requests+BeautifulSoup로 본문 내용이 너무 짧음 ({len(full_text)}자): {clean_url}")
+            logging.warning(f"⚠️ requests+BeautifulSoup로 본문 내용이 너무 짧음. Selenium 시도: {clean_url}")
             return ""
-
+            
     except requests.exceptions.RequestException as e:
-        logging.exception(f"HTTP 요청 중 오류 발생 ({clean_url}): {e}")
-        return ""
+        logging.warning(f"⚠️ requests+BeautifulSoup 실패. 다음 방법 시도: {url} -> {e}")
     except Exception as e:
-        logging.exception(f"BeautifulSoup 텍스트 추출 중 오류 발생 ({clean_url}): {e}")
-        return ""
+        logging.warning(f"⚠️ BeautifulSoup 파싱 실패. 다음 방법 시도: {url} -> {e}")
 
+    # 3. Selenium 폴백 시도 (주로 조선일보 특정)
+    if "chosun.com" in url:
+        logging.warning("⚠️ 조선일보 기사 → Selenium 크롤링 시도.")
+        try:
+            # 동기 함수를 비동기 스레드에서 실행
+            text = await asyncio.to_thread(extract_chosun_with_selenium, url)
+            if text and len(text) > 100:
+                logging.info("✅ Selenium으로 본문 추출 성공")
+                return text
+        except Exception as e:
+            logging.error(f"❌ asyncio.to_thread Selenium 실행 중 오류: {e}")
+    
+    logging.error(f"❌ 모든 방법으로 기사 텍스트를 가져오기 실패: {url}")
+    return None
 
 def clean_news_title(title):
     """
     뉴스 제목에서 언론사명, 슬로건, 특수 태그, 불필요한 기호 등을 제거하여 정제합니다.
     """
     patterns_to_remove = [
-        r'대한민국 오후를 여는 유일석간 문화일보',  # 문화일보 슬로건
-        r'\| 문화일보', r'문화일보',  # 문화일보 관련
-        r'\| 중앙일보', r'중앙일보',  # 중앙일보 관련
-        r'\| 경향신문', r'경향신문',  # 경향신문 관련
+        r'대한민국 오후를 여는 유일석간 문화일보', 
+        r'\| 문화일보', r'문화일보',
+        r'\| 중앙일보', r'중앙일보',
+        r'\| 경향신문', r'경향신문',
         r'머니투데이', r'MBN', r'연합뉴스', r'SBS 뉴스', r'MBC 뉴스', r'KBS 뉴스',
         r'동아일보', r'조선일보', r'한겨레', r'국민일보', r'서울신문', r'세계일보',
         r'노컷뉴스', r'헤럴드경제', r'매일경제', r'한국경제', r'아시아경제',
@@ -260,15 +271,15 @@ def clean_news_title(title):
     ]
 
     patterns_to_remove_regex = [
-        r'\[.*?\]',  # 예: [단독], [속보], [종합], [사진], [영상], [팩트체크]
-        r'\(.*?\)',  # 예: (서울), (종합), (영상)
-        r'\{.*?\}',  # 예: {뉴스초점}
-        r'<[^>]+>',  # HTML 태그 잔여물
-        r'\[\s*\w+\s*\]',  # 공백 포함 대괄호 태그
+        r'\[.*?\]',
+        r'\(.*?\)',
+        r'\{.*?\}',
+        r'<[^>]+>',
+        r'\[\s*\w+\s*\]',
     ]
 
     symbols_to_remove = [
-        r'\|', r'\:', r'\_', r'\-', r'\+', r'=', r'/', r'\\'  # |, :, _, -, +, =, /, \ 등
+        r'\|', r'\:', r'\_', r'\-', r'\+', r'=', r'/', r'\\'
     ]
 
     cleaned_title = title
@@ -366,6 +377,6 @@ def calculate_source_diversity_score(evidence):
     elif num_unique_sources == 2:
         return 3
     elif num_unique_sources == 1:
-        return 1  # 단일 출처라도 다양성 점수는 낮게 책정
+        return 1
     else:
-        return 0  # 출처가 없거나 유효하지 않은 경우
+        return 0
