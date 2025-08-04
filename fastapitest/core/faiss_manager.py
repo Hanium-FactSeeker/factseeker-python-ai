@@ -38,13 +38,14 @@ def upload_to_s3(local_path: str, s3_key: str):
 
 def get_or_build_faiss(url: str, article_text: str, embed_model) -> FAISS:
     hashed = sha256_of(url)
-    dir_path = os.path.join(CHUNK_CACHE_DIR, hashed)
-    faiss_path = os.path.join(dir_path, "index.faiss")
-    pkl_path = os.path.join(dir_path, "docs.pkl")
-    os.makedirs(dir_path, exist_ok=True)
+    folder_path = os.path.join(CHUNK_CACHE_DIR, hashed)
+    os.makedirs(folder_path, exist_ok=True)
+    
+    faiss_path = os.path.join(folder_path, "index.faiss")
+    pkl_path = os.path.join(folder_path, "index.pkl")
 
     s3_faiss_key = f"{S3_PREFIX}{hashed}/index.faiss"
-    s3_pkl_key = f"{S3_PREFIX}{hashed}/docs.pkl"
+    s3_pkl_key = f"{S3_PREFIX}{hashed}/index.pkl"
 
     # ✅ 로컬에 없으면 S3에서 다운로드 시도
     if not os.path.exists(faiss_path) or not os.path.exists(pkl_path):
@@ -60,7 +61,7 @@ def get_or_build_faiss(url: str, article_text: str, embed_model) -> FAISS:
         logging.info("✅ FAISS 캐시 로드 완료")
         with open(pkl_path, "rb") as f:
             stored_texts = pickle.load(f)
-        return FAISS.load_local(dir_path, embed_model, stored_texts)
+        return FAISS.load_local(folder_path, embed_model, stored_texts)
 
     # ❌ 둘 다 없으면 새로 생성
     logging.info("⚙️ FAISS 인덱스 새로 생성 중...")
@@ -68,7 +69,7 @@ def get_or_build_faiss(url: str, article_text: str, embed_model) -> FAISS:
     chunks = splitter.split_text(article_text)
     docs = [Document(page_content=chunk, metadata={"url": url}) for chunk in chunks]
     db = FAISS.from_documents(docs, embed_model)
-    db.save_local(dir_path)
+    db.save_local(folder_path)
     with open(pkl_path, "wb") as f:
         pickle.dump(docs, f)
 
