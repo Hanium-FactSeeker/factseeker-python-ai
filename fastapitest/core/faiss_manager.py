@@ -5,9 +5,11 @@ import logging
 import boto3
 import faiss
 import pickle
+import time
 from langchain.docstore.document import Document
 from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+
 
 CHUNK_CACHE_DIR = "article_faiss_cache"
 S3_BUCKET_NAME = "factseeker-faiss-db"
