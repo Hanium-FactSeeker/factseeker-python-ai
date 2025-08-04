@@ -24,10 +24,6 @@ import yt_dlp
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# EC2에서 설치된 chromedriver 경로 (일반적인 설치 경로)
-CHROMEDRIVER_PATH = "/usr/local/bin/chromedriver"
-
-
 def extract_video_id(url: str):
     """
     유튜브 URL에서 11자리 video_id를 추출합니다.
@@ -129,7 +125,7 @@ def extract_chosun_with_selenium(url: str):
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     # EC2 환경에 맞는 Chromedriver 경로를 Service 객체로 전달
-    service = Service(executable_path=CHROMEDRIVER_PATH)
+    service = Service(executable_path='/home/ubuntu/chromedriver-linux64/chromedriver'
     
     driver = None
     try:
