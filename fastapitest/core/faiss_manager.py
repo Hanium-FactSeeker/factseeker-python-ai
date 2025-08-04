@@ -59,14 +59,12 @@ def get_or_build_faiss(url: str, article_text: str, embed_model) -> FAISS:
     # ✅ 다운로드되었거나 원래부터 로컬에 있으면 로드
     if os.path.exists(faiss_path) and os.path.exists(pkl_path):
         logging.info("✅ FAISS 캐시 로드 완료")
-        with open(pkl_path, "rb") as f:
-            stored_texts = pickle.load(f)
         return FAISS.load_local(
-            faiss_path,
-            embed_model,
-            stored_texts,
-            allow_dangerous_deserialization=True  # 👈 요기 추가
+            local_dir=folder_path,
+            embeddings=embed_model,
+            allow_dangerous_deserialization=True  # 🔐 이거 필수
         )
+
 
     # ❌ 둘 다 없으면 새로 생성
     logging.info("⚙️ FAISS 인덱스 새로 생성 중...")
