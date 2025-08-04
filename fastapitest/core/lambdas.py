@@ -180,13 +180,31 @@ def extract_chosun_with_selenium(url: str):
 async def get_article_text(url: str):
     """
     비동기적으로 기사 본문을 가져오는 함수.
-    aiohttp -> newspaper -> BeautifulSoup -> Selenium 순서로 폴백을 시도합니다.
+    조선일보의 경우 Selenium을 먼저 사용하고,
+    그 외의 경우 aiohttp -> newspaper -> BeautifulSoup 순서로 폴백을 시도합니다.
     """
     logging.info(f"📰 비동기로 기사 텍스트 가져오기 시도: {url}")
     parsed_url = urlparse(url)
     clean_url = urlunparse(parsed_url._replace(query='', fragment=''))
 
-    # 1. aiohttp + newspaper 시도
+    # 1. 조선일보 URL일 경우, Selenium을 먼저 실행
+    if "chosun.com" in parsed_url.netloc:
+        logging.info("⭐ 조선일보 기사 감지. Selenium 크롤링을 먼저 시도합니다.")
+        try:
+            # 동기 함수를 비동기 스레드에서 실행
+            text = await asyncio.to_thread(extract_chosun_with_selenium, url)
+            if text and len(text) > 100:
+                logging.info("✅ Selenium으로 본문 추출 성공")
+                return text
+            else:
+                logging.warning("⚠️ Selenium으로 본문 추출 실패 또는 내용이 불충분합니다. 다음 방법을 시도하지 않습니다.")
+                return None
+        except Exception as e:
+            logging.error(f"❌ asyncio.to_thread Selenium 실행 중 오류: {e}")
+            return None
+
+    # 2. 그 외의 URL일 경우, 기존의 효율적인 방법 순차적으로 시도
+    # aiohttp + newspaper 시도
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
         async with aiohttp.ClientSession(headers=headers) as session:
@@ -208,7 +226,7 @@ async def get_article_text(url: str):
     except Exception as e:
         logging.warning(f"⚠️ newspaper 크롤링 실패. 다음 방법 시도: {url} -> {e}")
 
-    # 2. requests + BeautifulSoup 폴백 시도
+    # requests + BeautifulSoup 폴백 시도
     try:
         logging.warning(f"⚠️ requests+BeautifulSoup으로 본문 추출 재시도: {url}")
         response = requests.get(clean_url, headers=headers, timeout=30)
@@ -216,48 +234,26 @@ async def get_article_text(url: str):
         soup = BeautifulSoup(response.text, 'html.parser')
         
         article_content = []
-        if "chosun.com" in parsed_url.netloc:
-            # 조선일보에 대한 특정 선택자
-            article_body_section = soup.select_one('section.article-body') or soup.select_one('article#article-view-content-div')
-            if article_body_section:
-                paragraphs = article_body_section.find_all('p')
-                for p in paragraphs:
-                    text = p.get_text(strip=True)
-                    if text and not any(k in text for k in ["chosun.com", "기자", "Copyright", "무단전재"]):
-                        article_content.append(text)
-        else:
-            # 일반적인 언론사 본문 선택자
-            body_elements = soup.select('div.article_content, div#articleBodyContents, div#article_body, div.news_content, article.article_view, div.view_content')
-            for elem in body_elements:
-                text = elem.get_text(separator='\n', strip=True)
-                if text:
-                    article_content.append(text)
+        # 일반적인 언론사 본문 선택자
+        body_elements = soup.select('div.article_content, div#articleBodyContents, div#article_body, div.news_content, article.article_view, div.view_content')
+        for elem in body_elements:
+            text = elem.get_text(separator='\n', strip=True)
+            if text:
+                article_content.append(text)
 
         full_text = '\n'.join([c for c in article_content if c])
         if full_text and len(full_text) > 300:
             logging.info(f"✅ requests+BeautifulSoup으로 본문 추출 완료 ({len(full_text)}자): {url}")
             return full_text
         else:
-            logging.warning(f"⚠️ requests+BeautifulSoup로 본문 내용이 너무 짧음. Selenium 시도: {clean_url}")
-            return ""
+            logging.warning(f"⚠️ requests+BeautifulSoup로 본문 내용이 너무 짧음. 최종 실패.")
+            return None
             
     except requests.exceptions.RequestException as e:
-        logging.warning(f"⚠️ requests+BeautifulSoup 실패. 다음 방법 시도: {url} -> {e}")
+        logging.warning(f"⚠️ requests+BeautifulSoup 실패. 최종 실패: {url} -> {e}")
     except Exception as e:
-        logging.warning(f"⚠️ BeautifulSoup 파싱 실패. 다음 방법 시도: {url} -> {e}")
+        logging.warning(f"⚠️ BeautifulSoup 파싱 실패. 최종 실패: {url} -> {e}")
 
-    # 3. Selenium 폴백 시도 (주로 조선일보 특정)
-    if "chosun.com" in url:
-        logging.warning("⚠️ 조선일보 기사 → Selenium 크롤링 시도.")
-        try:
-            # 동기 함수를 비동기 스레드에서 실행
-            text = await asyncio.to_thread(extract_chosun_with_selenium, url)
-            if text and len(text) > 100:
-                logging.info("✅ Selenium으로 본문 추출 성공")
-                return text
-        except Exception as e:
-            logging.error(f"❌ asyncio.to_thread Selenium 실행 중 오류: {e}")
-    
     logging.error(f"❌ 모든 방법으로 기사 텍스트를 가져오기 실패: {url}")
     return None
 
