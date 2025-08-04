@@ -36,67 +36,47 @@ MAX_CLAIMS_TO_FACT_CHECK = 10
 embed_model = OpenAIEmbeddings(model="text-embedding-3-small", request_timeout=60, max_retries=5, chunk_size=500)
 
 async def search_and_retrieve_docs(claim):
-    """
-    주장(claim)에 대해 뉴스 검색을 수행하고, 관련성 있는 기사를 찾아 텍스트를 반환합니다.
-    병렬 처리로 get_article_text, get_or_build_faiss 를 동시에 실행합니다.
-    """
     summarizer = build_claim_summarizer()
     try:
         summary_result = await summarizer.ainvoke({"claim": claim})
         summarized_query = summary_result.content.strip()
+        logging.info(f"🔍 요약된 검색어: '{summarized_query}'")
     except Exception as e:
         logging.error(f"Claim 요약 실패: {e}, 원문으로 검색 진행")
-        summarized_query = claim  # fallback
-
-    logging.info(f"🔍 생성된 검색어: '{summarized_query}'")
+        summarized_query = claim
 
     search_results = await search_news_google_cs(summarized_query)
+    logging.info(f"📦 뉴스 검색 결과: {len(search_results)}개")
 
-    # 병렬 실행을 위한 내부 함수 정의
     async def process_single_article(item):
         url = item.get("link")
         raw_title = item.get("title", "")
         source_title = clean_news_title(raw_title)
         snippet = item.get("snippet")
 
-        if not url:
-            return None
-
         try:
-            # 기사 본문 추출 (await로 비동기)
             article_text = await get_article_text(url)
+            logging.info(f"📄 본문 크롤링 성공: {url} ({len(article_text)}자)")
             if not article_text or len(article_text) < 200:
-                logging.warning(f"기사 너무 짧음 또는 없음: {url}")
+                logging.warning(f"❗ 기사 본문 너무 짧음: {url}")
                 return None
 
-            # get_or_build_faiss는 blocking 함수이므로 to_thread로 실행
             faiss_db_result = await asyncio.to_thread(
                 get_or_build_faiss, url, article_text, embed_model
             )
-
-            if not faiss_db_result:
-                return None
-
             return Document(
                 page_content=article_text,
-                metadata={
-                    "source_title": source_title,
-                    "url": url,
-                    "snippet": snippet
-                }
+                metadata={"source_title": source_title, "url": url, "snippet": snippet}
             )
         except Exception as e:
-            logging.warning(f"❌ 기사 처리 중 오류: {url} - {e}")
+            logging.warning(f"❌ 기사 처리 실패: {url} - {e}")
             return None
 
-    # 병렬 실행 (최대 10개 정도까지만 현실적으로 추천)
     tasks = [process_single_article(item) for item in search_results[:10]]
     results = await asyncio.gather(*tasks)
-
-    # None 제외한 유효한 Document만 반환
     docs = [doc for doc in results if doc]
+    logging.info(f"📰 크롤링 및 벡터화 성공 문서 수: {len(docs)}")
     return docs
-
 
 async def run_fact_check(youtube_url):
     """
