@@ -20,13 +20,18 @@ s3 = boto3.client("s3")
 def sha256_of(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-def download_from_s3_if_exists(s3_key: str, local_path: str) -> bool:
+def download_from_s3_if_exists(s3_key, local_path):
     try:
         s3.download_file(S3_BUCKET_NAME, s3_key, local_path)
-        logging.info(f"🔽 S3에서 다운로드 완료: {s3_key}")
-        return True
+        # ✅ 다운로드 직후 실제 파일 존재/크기 체크
+        if os.path.exists(local_path):
+            logging.info(f"파일 다운로드 OK: {local_path} ({os.path.getsize(local_path)} bytes)")
+            return True
+        else:
+            logging.error(f"파일 다운로드 후 실제로 없음!! {local_path}")
+            return False
     except Exception as e:
-        logging.warning(f"⚠️ S3 다운로드 실패: {s3_key} → {e}")
+        logging.error(f"S3 다운로드 실패: {s3_key} → {local_path} / error: {e}")
         return False
 
 def upload_to_s3(local_path: str, s3_key: str):
