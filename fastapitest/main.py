@@ -14,6 +14,7 @@ from langchain_community.vectorstores import FAISS
 from core.lambdas import clean_news_title, search_news_google_cs # 필요한 유틸리티 추가
 import logging
 from core.faiss_manager import get_or_build_faiss
+import time
 
 
 logging.basicConfig(
