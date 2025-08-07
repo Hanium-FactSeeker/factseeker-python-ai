@@ -79,6 +79,12 @@ def download_from_s3(local_dir, s3_key):
         logging.error(f"S3 다운로드 중 오류 발생: s3://{S3_BUCKET_NAME}/{s3_key} - {e}")
         return False
 
+def url_to_faiss_key(url):
+    return hashlib.md5(url.encode()).hexdigest()
+
+def get_faiss_cache_path(url):
+    return os.path.join(CHUNK_CACHE_DIR, url_to_faiss_key(url))
+
 async def get_article_text_safe(url):
     try:
         text = await get_article_text(url)
@@ -130,6 +136,7 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
         except Exception as e:
             logging.error(f"FAISS 파티션 {faiss_dir} 검색 실패: {e}")
 
+    # **여러 기사 URL(중복 없이 여러 개) 모두 후보로!**
     article_urls = list(matched_urls.keys())
     coros = [get_article_text_safe(url) for url in article_urls]
     article_results = await asyncio.gather(*coros)
@@ -147,6 +154,50 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
             ))
     logging.info(f"📰 최종 크롤링 성공 문서 수: {len(docs)}")
     return docs
+
+async def get_or_build_url_faiss_db(url, embed_model):
+    """기사 URL별로 FAISS 벡터 캐시(로컬/S3) 저장/재활용"""
+    local_faiss_path = get_faiss_cache_path(url)
+    s3_key = f"url_faiss_cache/{url_to_faiss_key(url)}"
+    faiss_db = None
+    # 1. 로컬 캐시
+    if os.path.exists(local_faiss_path):
+        try:
+            faiss_db = FAISS.load_local(local_faiss_path, embed_model, allow_dangerous_deserialization=True)
+            logging.info(f"✅ 로컬 URL 캐시에서 FAISS DB 로드 성공: {local_faiss_path}")
+            return faiss_db
+        except Exception as e:
+            logging.warning(f"⚠️ 로컬 URL 캐시 로드 실패, 재생성 시도: {e}")
+            shutil.rmtree(local_faiss_path)
+    # 2. S3 캐시
+    if not faiss_db:
+        logging.info(f"S3 URL 캐시 확인 중: s3://{S3_BUCKET_NAME}/{s3_key}")
+        if download_from_s3(local_faiss_path, s3_key):
+            try:
+                faiss_db = FAISS.load_local(local_faiss_path, embed_model, allow_dangerous_deserialization=True)
+                logging.info(f"✅ S3 URL 캐시에서 FAISS DB 다운로드 및 로드 성공")
+                return faiss_db
+            except Exception as e:
+                logging.warning(f"⚠️ S3 URL 캐시 로드 실패, 재생성 시도: {e}")
+                shutil.rmtree(local_faiss_path)
+        else:
+            logging.info(f"S3에 URL 캐시 없음. 새로 생성합니다.")
+    return None  # 없으면 None
+
+async def build_and_upload_url_faiss_db(url, article_text, embed_model):
+    """기사 본문으로 새로 벡터 생성/로컬+S3 업로드"""
+    local_faiss_path = get_faiss_cache_path(url)
+    s3_key = f"url_faiss_cache/{url_to_faiss_key(url)}"
+    os.makedirs(local_faiss_path, exist_ok=True)
+    doc = Document(page_content=article_text, metadata={"url": url})
+    faiss_db = FAISS.from_documents([doc], embed_model)
+    faiss_db.save_local(local_faiss_path)
+    try:
+        upload_to_s3(local_faiss_path, s3_key)
+        logging.info(f"✅ S3 URL 캐시에 FAISS 인덱스 업로드 완료: {s3_key}")
+    except Exception as e:
+        logging.error(f"❌ S3 URL 업로드 실패: {e}")
+    return faiss_db
 
 async def run_fact_check(youtube_url, faiss_partition_dirs):
     video_id = extract_video_id(youtube_url)
@@ -209,65 +260,31 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
     async def process_claim_step(idx, claim):
         logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
-        claim_hash = hashlib.md5(claim.encode()).hexdigest()
-        s3_key = f"claim_faiss_cache/{claim_hash}"
-        local_faiss_path = os.path.join(CHUNK_CACHE_DIR, s3_key)
-
-        faiss_db = None
-        docs = None
-
-        # 1. 로컬 캐시 확인
-        if os.path.exists(local_faiss_path):
-            try:
-                faiss_db = FAISS.load_local(local_faiss_path, embed_model, allow_dangerous_deserialization=True)
-                docs = [doc for doc in faiss_db.docstore._dict.values()]
-                logging.info(f"✅ 로컬 캐시에서 FAISS DB 로드 성공: {local_faiss_path}")
-            except Exception as e:
-                logging.warning(f"⚠️ 로컬 캐시 로드 실패, 재생성 시도: {e}")
-                shutil.rmtree(local_faiss_path)
-
-        # 2. S3 캐시 확인
-        if not faiss_db:
-            logging.info(f"S3 캐시 확인 중: s3://{S3_BUCKET_NAME}/{s3_key}")
-            if download_from_s3(local_faiss_path, s3_key):
-                try:
-                    faiss_db = FAISS.load_local(local_faiss_path, embed_model, allow_dangerous_deserialization=True)
-                    docs = [doc for doc in faiss_db.docstore._dict.values()]
-                    logging.info(f"✅ S3 캐시에서 FAISS DB 다운로드 및 로드 성공")
-                except Exception as e:
-                    logging.warning(f"⚠️ S3 캐시 로드 실패, 재생성 시도: {e}")
-                    shutil.rmtree(local_faiss_path)
-            else:
-                logging.info(f"S3에 캐시 없음. 새로 생성합니다.")
-
-        # 3. 새로 생성 및 S3에 업로드
-        if not faiss_db:
-            docs = await search_and_retrieve_docs(claim, faiss_partition_dirs)
-            if not docs:
-                logging.info(f"근거 문서를 찾지 못함: '{claim}'")
-                return {
-                    "claim": claim, "result": "insufficient_evidence",
-                    "confidence_score": 0, "evidence": []
-                }
-
-            os.makedirs(local_faiss_path, exist_ok=True)
-            faiss_db = FAISS.from_documents(docs, embed_model)
-            faiss_db.save_local(local_faiss_path)
-            logging.info(f"✅ FAISS DB 새로 생성 및 로컬 저장 완료: {local_faiss_path}")
-
-            try:
-                logging.info(f"🚀 S3에 FAISS 인덱스 업로드 시도: s3://{S3_BUCKET_NAME}/{s3_key}")
-                upload_to_s3(local_faiss_path, s3_key)
-                logging.info(f"✅ S3 업로드 성공.")
-            except Exception as e:
-                logging.error(f"❌ S3 업로드 실패: {e}")
-
+        # 1. claim에 대해 관련 기사 url 리스트 확보 (여러 개!)
+        docs = await search_and_retrieve_docs(claim, faiss_partition_dirs)
         if not docs:
-            docs = [doc for doc_id, doc in faiss_db.docstore._dict.items()]
+            logging.info(f"근거 문서를 찾지 못함: '{claim}'")
+            return {
+                "claim": claim, "result": "insufficient_evidence",
+                "confidence_score": 0, "evidence": []
+            }
 
-        # --- ✨✨✨ 여기서 동일 claim 내 evidence URL 중복 제거 ✨✨✨ ---
+        # 2. 각 url별로 벡터 캐시 (존재하면 재활용, 없으면 생성)
         url_set = set()
-        validated_evidence = []
+        faiss_dbs = {}
+        for doc in docs:
+            url = doc.metadata.get("url")
+            if not url or url in url_set:
+                continue
+            url_set.add(url)
+            # 벡터 DB 재활용/생성
+            faiss_db = await get_or_build_url_faiss_db(url, embed_model)
+            if not faiss_db:
+                faiss_db = await build_and_upload_url_faiss_db(url, doc.page_content, embed_model)
+            faiss_dbs[url] = faiss_db
+
+        # 3. 각 doc(기사)에 대해 LLM 팩트체크
+        evidence_results = []
         fact_checker = build_factcheck_chain()
 
         async def factcheck_doc(doc):
@@ -288,9 +305,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                         "예" in relevance.group(1)
                         and "아니오" not in fact_check_result_text
                         and url
-                        and url not in url_set
                     ):
-                        url_set.add(url)
                         return {
                             "url": url,
                             "relevance": "yes",
@@ -302,9 +317,15 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 logging.error(f"    - LLM 팩트체크 체인 실행 중 오류: {e}")
             return None
 
-        factcheck_tasks = [factcheck_doc(doc) for doc in docs]
+        factcheck_tasks = [factcheck_doc(doc) for doc in docs if doc.metadata.get("url")]
         factcheck_results = await asyncio.gather(*factcheck_tasks)
-        validated_evidence = [res for res in factcheck_results if res]
+        # 같은 claim 내 evidence 중 같은 url은 중복X
+        validated_evidence = []
+        evidence_urls = set()
+        for res in factcheck_results:
+            if res and res["url"] not in evidence_urls:
+                evidence_urls.add(res["url"])
+                validated_evidence.append(res)
 
         diversity_score = calculate_source_diversity_score(validated_evidence)
         confidence_score = calculate_fact_check_confidence({
