@@ -142,6 +142,9 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
     cse_title_embs = embed_model.embed_documents(cse_titles)
 
     matched_urls = {}
+
+    # --- ✨ FAISS 탐색 로그 추가 시작 ---
+    logging.info(f"🔎 FAISS DB 유사 기사 탐색 시작 (파티션 개수: {len(faiss_partition_dirs)})")
     for faiss_dir in faiss_partition_dirs:
         faiss_index_path = os.path.join(faiss_dir, "index.faiss")
         faiss_pkl_path = os.path.join(faiss_dir, "index.pkl")
@@ -167,6 +170,8 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
                             }
         except Exception as e:
             logging.error(f"FAISS 파티션 {faiss_dir} 검색 실패: {e}")
+    logging.info(f"🔎 FAISS 유사 기사 탐색 완료 - 매칭 기사 수: {len(matched_urls)}개")
+    # --- ✨ FAISS 탐색 로그 추가 끝 ---
 
     article_urls = list(matched_urls.keys())
     coros = [ensure_article_faiss(url) for url in article_urls]
