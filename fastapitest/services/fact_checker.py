@@ -199,13 +199,15 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 relevance = re.search(r"관련성: (.+)", result_content)
                 fact_check_result = re.search(r"사실 설명 여부: (.+)", result_content)
                 justification = re.search(r"간단한 설명: (.+)", result_content)
+                snippet = re.search(r"핵심 근거 문장: (.+)", result_content)
                 if relevance and fact_check_result and justification:
                     if "예" in relevance.group(1):
                         return {
                             "url": doc.metadata.get("url"),
                             "relevance": "yes",
                             "fact_check_result": fact_check_result.group(1).strip(),
-                            "justification": justification.group(1).strip()
+                            "justification": justification.group(1).strip(),
+                            "snippet": snippet.group(1).strip() if snippet else ""
                         }
             except Exception as e:
                 logging.error(f"    - LLM 팩트체크 체인 실행 중 오류: {e}")
