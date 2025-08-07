@@ -1,61 +1,61 @@
 import os
-import time
 import logging
 import boto3
-from core.faiss_manager import download_from_s3_if_exists, CHUNK_CACHE_DIR
+from botocore.exceptions import ClientError
+from core.faiss_manager import S3_BUCKET_NAME, S3_PREFIX, CHUNK_CACHE_DIR
 
-# S3 설정
-S3_BUCKET_NAME = "factseeker-faiss-db"
+logging.basicConfig(level=logging.INFO)
 s3 = boto3.client("s3")
 
-def list_faiss_keys_from_s3(s3_prefix):
-    """지정된 prefix에서 .faiss 파일 키만 리스트로 반환"""
-    paginator = s3.get_paginator('list_objects_v2')
-    page_iterator = paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=s3_prefix)
-    keys = []
-    for page in page_iterator:
-        for obj in page.get("Contents", []):
-            if obj["Key"].endswith(".faiss"):
-                keys.append(obj["Key"])
-    return keys
+def preload_faiss_from_existing_s3():
+    """
+    S3 bucket에서 모든 FAISS 파티션을 로컬 캐시 디렉토리로 미리 다운로드합니다.
+    """
+    if not os.path.exists(CHUNK_CACHE_DIR):
+        os.makedirs(CHUNK_CACHE_DIR)
 
-def map_query_to_partition(query_vector, num_partitions=10):
-    """임베딩 벡터 기반 파티션 결정 (단순 해시 기반)"""
-    return int(sum(query_vector) * 1000) % num_partitions
-
-def get_partition_prefix_from_query(query_vector):
-    partition_num = map_query_to_partition(query_vector)
-    return f"feature_faiss_db_openai_partition/partition_{partition_num}/"
-
-async def preload_faiss_from_existing_s3(s3_prefix):
-    """지정된 S3 prefix 하위에 존재하는 인덱스들만 로컬로 다운로드"""
-    if s3_prefix.startswith("article_faiss_cache"):
-        logging.info("🛑 본문 인덱스는 프리로드하지 않음")
-        return
-
-    os.makedirs(CHUNK_CACHE_DIR, exist_ok=True)
-    logging.info(f"🚀 S3 FAISS 인덱스 프리로드 시작 (prefix={s3_prefix})")
-
-    faiss_keys = list_faiss_keys_from_s3(s3_prefix)
-    logging.info(f"🔢 프리로드 대상 인덱스 개수: {len(faiss_keys)}개")
-
-    for faiss_key in faiss_keys:
-        # S3에서 예시: feature_faiss_db_openai_partition/partition_0/index.faiss
-        dir_name = os.path.basename(os.path.dirname(faiss_key))  # partition_0 등
-        pkl_key = os.path.join(os.path.dirname(faiss_key), "index.pkl")
+    logging.info(f"S3 버킷 '{S3_BUCKET_NAME}'의 '{S3_PREFIX}'에서 FAISS 파티션 다운로드를 시작합니다.")
+    
+    try:
+        # S3_PREFIX 아래의 모든 '폴더'(파티션)를 찾습니다.
+        paginator = s3.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=S3_PREFIX, Delimiter='/')
         
-        # [여기서 고침!] 폴더 생성 후 파일 저장
-        local_dir = os.path.join(CHUNK_CACHE_DIR, dir_name)
-        os.makedirs(local_dir, exist_ok=True)
-        faiss_path = os.path.join(local_dir, "index.faiss")
-        pkl_path = os.path.join(local_dir, "index.pkl")
+        partition_prefixes = []
+        for page in pages:
+            if "CommonPrefixes" in page:
+                for obj in page.get('CommonPrefixes', []):
+                    partition_prefixes.append(obj.get('Prefix'))
 
-        start = time.time()
-        faiss_ok = download_from_s3_if_exists(faiss_key, faiss_path)
-        pkl_ok = download_from_s3_if_exists(pkl_key, pkl_path)
-        elapsed = time.time() - start
+        if not partition_prefixes:
+            logging.warning("다운로드할 FAISS 파티션을 찾을 수 없습니다.")
+            return
 
-        if faiss_ok and pkl_ok:
-            logging.info(f"✅ 프리로드 완료: {dir_name} ⏱️ {elapsed:.2f}초")
-        else:
-            logging.warning(f"⚠️ 프리로드 실패: {dir_name}")
+        logging.info(f"{len(partition_prefixes)}개의 파티션을 다운로드합니다.")
+
+        for s3_key_prefix in partition_prefixes:
+            # S3 경로에서 로컬 디렉토리 이름을 추출합니다 (예: 'partition_0/')
+            partition_name = os.path.basename(os.path.normpath(s3_key_prefix))
+            local_partition_dir = os.path.join(CHUNK_CACHE_DIR, partition_name)
+
+            if os.path.exists(local_partition_dir):
+                logging.info(f"'{local_partition_dir}'은 이미 존재하므로 건너뜁니다.")
+                continue
+
+            os.makedirs(local_partition_dir, exist_ok=True)
+            
+            # 해당 파티션 폴더 내의 모든 파일을 다운로드합니다.
+            response = s3.list_objects_v2(Bucket=S3_BUCKET_NAME, Prefix=s3_key_prefix)
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    s3_file_key = obj['Key']
+                    local_file_path = os.path.join(local_partition_dir, os.path.basename(s3_file_key))
+                    try:
+                        logging.info(f"다운로드 중: {s3_file_key} -> {local_file_path}")
+                        s3.download_file(S3_BUCKET_NAME, s3_file_key, local_file_path)
+                    except ClientError as e:
+                        logging.error(f"'{s3_file_key}' 파일 다운로드 실패: {e}")
+
+    except Exception as e:
+        logging.error(f"FAISS 파티션 프리로딩 중 오류 발생: {e}", exc_info=True)
+
