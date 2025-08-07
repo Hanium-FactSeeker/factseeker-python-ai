@@ -193,7 +193,7 @@ def build_factcheck_chain():
 
 판단:
 """)
-    return prompt | get_chat_llllm()
+    return prompt | get_chat_llm()
 
 def build_reduce_similar_claims_chain():
     """LLM 기반으로 의미적으로 유사하거나 중복되는 주장을 제거하는 체인을 구축합니다."""
