@@ -34,7 +34,7 @@ from core.faiss_manager import CHUNK_CACHE_DIR
 # --- 설정값 ---
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "factseeker-faiss-db")
 MAX_CLAIMS_TO_FACT_CHECK = 10
-MAX_ARTICLES_PER_CLAIM = 15  # ✨ 주장당 최대 검색 기사 수 (이 값을 조절하세요) ✨
+MAX_ARTICLES_PER_CLAIM = 10  # ✨ 주장당 최대 검색 기사 수 (이 값을 조절하세요) ✨
 DISTANCE_THRESHOLD = 0.8
 # --- 설정값 끝 ---
 
