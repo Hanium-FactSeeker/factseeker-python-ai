@@ -299,12 +299,15 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 justification = re.search(r"간단한 설명: (.+)", result_content)
                 snippet = re.search(r"핵심 근거 문장: (.+)", result_content)
                 url = doc.metadata.get("url")
+                
+                # --- ✨✨✨ 수정된 부분 ✨✨✨ ---
+                # "관련성: 예" 조건과 URL 중복 여부만 확인합니다.
                 if (
                     relevance and fact_check_result_match and justification
                     and "예" in relevance.group(1)
-                    and "아니오" not in fact_check_result_match.group(1)
                     and url and url not in url_set
                 ):
+                # --- ✨✨✨ 수정 끝 ---
                     url_set.add(url)
                     return {
                         "url": url, "relevance": "yes",
