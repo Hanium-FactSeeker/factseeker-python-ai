@@ -7,7 +7,7 @@ from langchain_core.prompts import PromptTemplate
 def get_chat_llm():
     """LangChain용 ChatOpenAI 모델을 초기화합니다."""
     # OpenAI API 키는 .env에서 로드됩니다.
-    return ChatOpenAI(model="gpt-4o", temperature=0, request_timeout=60, max_retries=5)  
+    return ChatOpenAI(model="gpt-4o", temperature=0, request_timeout=60, max_retries=5, verbose=True)  
 
 def build_claim_extractor():
     prompt = PromptTemplate.from_template("""
@@ -21,10 +21,11 @@ def build_claim_extractor():
 # 1. [절대 원칙] 자막에 명시적으로 언급되지 않은 정보, 뉘앙스, 단어는 절대로 추가하거나 왜곡하지 마세요. (가장 중요)
 # 2. [출력 형식 준수] 아래 [출력 형식] 섹션에 명시된 포맷을 다른 모든 지침에 우선하여 반드시 지켜주세요.
 # 3. [단일 주장 분리] 하나의 문장에 여러 주장이 있다면, 각각의 주장을 별개의 문장으로 분리하여 개별적으로 판단하고 출력해야 합니다.
+# 4. 팩트체크 가능한 경우에는, **정확하고 간결한 (주어+목적어+서술어) 문장 형태로 정제**하여 출력해야 합니다.
 
 [판단 목적]
 - 문장이 참인지 거짓인지를 따지는 것이 아니라, **객관적 사실 여부를 검증할 수 있는 주장인지**를 선별하는 것이 목표입니다.
-- 팩트체크 가능한 경우에는, **정확하고 간결한 (주어+목적어+서술어) 문장 형태로 정제**하여 출력해야 합니다.
+
 
 [출력 형식]
 # 이 출력 형식은 모든 규칙에 우선하는 절대적인 규칙입니다.
