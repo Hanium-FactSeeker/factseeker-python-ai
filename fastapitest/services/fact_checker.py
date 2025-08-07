@@ -48,6 +48,9 @@ embed_model = OpenAIEmbeddings(
     model="text-embedding-3-small", request_timeout=60, max_retries=5, chunk_size=500
 )
 
+# URL별 동시 처리를 막기 위한 잠금(Lock) 객체
+url_locks = {}
+
 # --- URL 기반 캐시 경로 및 S3 동기화 ---
 def url_to_cache_key(url):
     return hashlib.md5(url.encode()).hexdigest()
@@ -91,44 +94,52 @@ def download_from_s3(local_dir, s3_key):
         logging.error(f"S3 다운로드 중 오류 발생: s3://{S3_BUCKET_NAME}/{s3_key} - {e}")
         return False
 
-# --- 기사 URL 기준 FAISS 생성/로드 ---
+# --- 기사 URL 기준 FAISS 생성/로드 (잠금 로직 적용) ---
 async def ensure_article_faiss(url):
-    """기사 본문을 벡터화하여 캐시(S3/로컬)에 저장, 있으면 로드"""
-    cache_key = url_to_cache_key(url)
-    local_path = get_article_faiss_path(url)
-    faiss_path = os.path.join(local_path, "index.faiss")
-    pkl_path = os.path.join(local_path, "index.pkl")
-    s3_key = f"article_faiss_cache/{cache_key}"
+    """(잠금 기능 추가) 기사 본문을 벡터화하고 캐시(S3/로컬)에 저장/로드"""
+    lock = url_locks.setdefault(url, asyncio.Lock())
+    async with lock:
+        cache_key = url_to_cache_key(url)
+        local_path = get_article_faiss_path(url)
+        faiss_path = os.path.join(local_path, "index.faiss")
+        pkl_path = os.path.join(local_path, "index.pkl")
+        s3_key = f"article_faiss_cache/{cache_key}"
 
-    if os.path.exists(faiss_path) and os.path.exists(pkl_path):
-        try:
-            return FAISS.load_local(local_path, embed_model, allow_dangerous_deserialization=True)
-        except Exception as e:
-            shutil.rmtree(local_path, ignore_errors=True)
-            logging.warning(f"로컬 캐시 손상, 재생성 시도: {e}")
-            
-    if s3 is not None and download_from_s3(local_path, s3_key):
-        try:
-            return FAISS.load_local(local_path, embed_model, allow_dangerous_deserialization=True)
-        except Exception as e:
-            shutil.rmtree(local_path, ignore_errors=True)
-            logging.warning(f"S3 캐시 손상, 재생성 시도: {e}")
-            
-    text = await get_article_text(url)
-    if not text or len(text) < 200:
-        return None
+        if os.path.exists(faiss_path) and os.path.exists(pkl_path):
+            try:
+                logging.info(f"캐시 재사용 (잠금 후 확인): {url}")
+                return FAISS.load_local(local_path, embed_model, allow_dangerous_deserialization=True)
+            except Exception as e:
+                shutil.rmtree(local_path, ignore_errors=True)
+                logging.warning(f"로컬 캐시 손상, 재생성 시도: {e}")
         
-    doc = Document(page_content=text, metadata={"url": url})
-    faiss_db = FAISS.from_documents([doc], embed_model)
-    faiss_db.save_local(local_path)
-    if s3 is not None:
-        try:
-            upload_to_s3(local_path, s3_key)
-        except Exception as e:
-            logging.warning(f"S3 업로드 실패: {e}")
-    return faiss_db
+        if s3 is not None and download_from_s3(local_path, s3_key):
+            try:
+                logging.info(f"S3 캐시 재사용 (잠금 후 확인): {url}")
+                return FAISS.load_local(local_path, embed_model, allow_dangerous_deserialization=True)
+            except Exception as e:
+                shutil.rmtree(local_path, ignore_errors=True)
+                logging.warning(f"S3 캐시 손상, 재생성 시도: {e}")
+        
+        logging.info(f"캐시 없음, 신규 크롤링 시작: {url}")
+        text = await get_article_text(url)
+        if not text or len(text) < 200:
+            return None
+            
+        doc = Document(page_content=text, metadata={"url": url})
+        faiss_db = FAISS.from_documents([doc], embed_model)
+        faiss_db.save_local(local_path)
+        
+        if s3 is not None:
+            try:
+                upload_to_s3(local_path, s3_key)
+                logging.info(f"✅ S3 업로드 성공: {s3_key}")
+            except Exception as e:
+                logging.warning(f"S3 업로드 실패: {e}")
+                
+        return faiss_db
 
-# --- CSE → FAISS에서 여러 기사, url 기준 중복 없는 문서만 수집 ---
+# --- CSE → FAISS에서 여러 기사, url 기준 중복 없는 문서만 수집 (한도 즉시 중단) ---
 async def search_and_retrieve_docs(claim, faiss_partition_dirs):
     summarizer = build_claim_summarizer()
     try:
@@ -144,16 +155,15 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
     cse_raw_titles = [item.get('title', '') for item in search_results[:10]]
     cse_urls = [item.get('link') for item in search_results[:10]]
     
-    # 검색할 제목이 없으면 바로 종료
     if not cse_titles:
         logging.warning("Google 검색 결과에서 제목을 찾을 수 없어 탐색을 종료합니다.")
         return []
         
     cse_title_embs = embed_model.embed_documents(cse_titles)
-    # 검색할 벡터 배열 준비
     search_vectors = np.array(cse_title_embs, dtype=np.float32)
 
     matched_urls = {}
+    limit_reached = False
 
     logging.info(f"🔎 FAISS DB 유사 기사 탐색 시작 (파티션 개수: {len(faiss_partition_dirs)})")
     for faiss_dir in faiss_partition_dirs:
@@ -162,50 +172,34 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
             continue
             
         try:
-            # --- ✨✨✨ 진단 로그 시작 ✨✨✨ ---
-            logging.info(f"--- 파티션 검사 시작: [{faiss_dir}] ---")
-            
             title_faiss_db = FAISS.load_local(
                 faiss_dir, embeddings=embed_model, allow_dangerous_deserialization=True
             )
-            
-            # 1. FAISS 인덱스 객체 자체를 확인합니다.
-            index_object = title_faiss_db.index
-            if index_object:
-                # 2. 인덱스 내 벡터의 총 개수(ntotal)를 확인합니다.
-                vector_count = index_object.ntotal
-                logging.info(f"[{faiss_dir}] 로드 성공. 벡터 개수(ntotal): {vector_count}")
-
-                # 3. 벡터가 실제로 있을 때만 검색을 시도합니다.
-                if vector_count > 0:
-                    # 4. 검색할 벡터의 상태를 확인합니다.
-                    logging.info(f"[{faiss_dir}] 검색 실행 -> 검색 대상 벡터 shape: {search_vectors.shape}, dtype: {search_vectors.dtype}")
-                    
-                    D, I = index_object.search(search_vectors, k=3) # .index로 직접 접근
-                    
-                    logging.info(f"[{faiss_dir}] 검색 성공!") # 이 로그가 뜨면 에러 없이 통과한 것
-                    
-                    for j in range(len(cse_title_embs)):
-                        for i, dist in enumerate(D[j]):
-                            if dist < DISTANCE_THRESHOLD:
-                                faiss_idx = I[j][i]
-                                docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
-                                doc = title_faiss_db.docstore._dict[docstore_id]
-                                url = doc.metadata.get("url")
-                                if url and url not in matched_urls:
-                                    matched_urls[url] = {
-                                        "matched_cse_title": cse_titles[j],
-                                        "raw_cse_title": cse_raw_titles[j]
-                                    }
-                else:
-                    logging.warning(f"[{faiss_dir}] 벡터 개수가 0이므로 검색을 건너뜁니다.")
-            else:
-                logging.error(f"[{faiss_dir}] FAISS 인덱스 객체(.index) 로드 실패!")
-            # --- ✨✨✨ 진단 로그 끝 ✨✨✨ ---
-
+            if title_faiss_db.index.ntotal > 0:
+                D, I = title_faiss_db.index.search(search_vectors, k=3)
+                for j in range(len(cse_title_embs)):
+                    for i, dist in enumerate(D[j]):
+                        if dist < DISTANCE_THRESHOLD:
+                            faiss_idx = I[j][i]
+                            docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
+                            doc = title_faiss_db.docstore._dict[docstore_id]
+                            url = doc.metadata.get("url")
+                            if url and url not in matched_urls:
+                                matched_urls[url] = {
+                                    "matched_cse_title": cse_titles[j],
+                                    "raw_cse_title": cse_raw_titles[j]
+                                }
+                                if len(matched_urls) >= MAX_ARTICLES_PER_CLAIM:
+                                    limit_reached = True
+                                    break
+                    if limit_reached:
+                        break
         except Exception as e:
-            # 에러 발생 시, 어떤 파티션에서 어떤 이유로 실패했는지 더 상세히 기록합니다.
-            logging.error(f"❌ FAISS 파티션 [{faiss_dir}] 처리 중 심각한 오류 발생: {e}", exc_info=True)
+            logging.error(f"FAISS 파티션 {faiss_dir} 검색 실패: {e}")
+
+        if limit_reached:
+            logging.info(f"목표 기사 수({MAX_ARTICLES_PER_CLAIM}개) 도달, 모든 파티션 탐색을 중단합니다.")
+            break
 
     logging.info(f"🔎 FAISS 유사 기사 탐색 완료 - 최종 매칭 기사 수: {len(matched_urls)}개")
 
@@ -247,10 +241,8 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
         if not claims:
             return {
-                "video_id": video_id,
-                "video_url": youtube_url,
-                "video_total_confidence_score": 0,
-                "claims": []
+                "video_id": video_id, "video_url": youtube_url,
+                "video_total_confidence_score": 0, "claims": []
             }
 
         reducer = build_reduce_similar_claims_chain()
@@ -264,10 +256,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 json_content = json_match.group(1)
                 claims_to_check = json.loads(json_content)
             else:
-                claims_to_check = [
-                    line.strip() for line in reduced_result.content.strip().split('\n')
-                    if line.strip()
-                ]
+                claims_to_check = [line.strip() for line in reduced_result.content.strip().split('\n') if line.strip()]
         except json.JSONDecodeError:
             claims_to_check = [
                 line.strip() for line in reduced_result.content.strip().split('\n')
@@ -279,10 +268,8 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
         if not claims_to_check:
             return {
-                "video_id": video_id,
-                "video_url": youtube_url,
-                "video_total_confidence_score": 0,
-                "claims": []
+                "video_id": video_id, "video_url": youtube_url,
+                "video_total_confidence_score": 0, "claims": []
             }
 
     except Exception as e:
@@ -305,9 +292,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
         async def factcheck_doc(doc):
             try:
-                check_result = await fact_checker.ainvoke({
-                    "claim": claim, "context": doc.page_content
-                })
+                check_result = await fact_checker.ainvoke({"claim": claim, "context": doc.page_content})
                 result_content = check_result.content
                 relevance = re.search(r"관련성: (.+)", result_content)
                 fact_check_result_match = re.search(r"사실 설명 여부: (.+)", result_content)
@@ -322,8 +307,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 ):
                     url_set.add(url)
                     return {
-                        "url": url,
-                        "relevance": "yes",
+                        "url": url, "relevance": "yes",
                         "fact_check_result": fact_check_result_match.group(1).strip(),
                         "justification": justification.group(1).strip(),
                         "snippet": snippet.group(1).strip() if snippet else ""
@@ -351,16 +335,17 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             "evidence": validated_evidence[:3]
         }
 
-    claim_tasks = [
-        process_claim_step(idx, claim)
-        for idx, claim in enumerate(claims_to_check)
-    ]
+    claim_tasks = [process_claim_step(idx, claim) for idx, claim in enumerate(claims_to_check)]
     outputs = await asyncio.gather(*claim_tasks, return_exceptions=True)
     outputs = [output for output in outputs if not isinstance(output, Exception)]
 
-    avg_score = round(sum(o['confidence_score'] for o in outputs) / len(outputs)) if outputs else 0
-    evidence_ratio = sum(1 for o in outputs if o["result"] == "likely_true") / len(outputs) if outputs else 0
-    summary = f"증거 확보된 주장 비율: {evidence_ratio*100:.1f}%" if len(outputs) >= 3 else f"신뢰도 평가 불가 (팩트체크 주장 수 부족: {len(outputs)}개)"
+    if outputs:
+        avg_score = round(sum(o['confidence_score'] for o in outputs) / len(outputs))
+        evidence_ratio = sum(1 for o in outputs if o["result"] == "likely_true") / len(outputs)
+        summary = f"증거 확보된 주장 비율: {evidence_ratio*100:.1f}%" if len(outputs) >= 3 else f"신뢰도 평가 불가 (팩트체크 주장 수 부족: {len(outputs)}개)"
+    else:
+        avg_score = 0
+        summary = "결과 없음"
     
     classifier = build_channel_type_classifier()
     classification = await classifier.ainvoke({"transcript": transcript})
