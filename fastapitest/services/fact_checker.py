@@ -238,6 +238,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         if os.path.exists(local_faiss_path):
             try:
                 faiss_db = FAISS.load_local(local_faiss_path, embed_model, allow_dangerous_deserialization=True)
+                docs = [doc for doc in faiss_db.docstore._dict.values()]
                 logging.info(f"✅ 로컬 캐시에서 FAISS DB 로드 성공: {local_faiss_path}")
             except Exception as e:
                 logging.warning(f"⚠️ 로컬 캐시 로드 실패, 재생성 시도: {e}")
@@ -249,6 +250,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             if download_from_s3(local_faiss_path, s3_key):
                 try:
                     faiss_db = FAISS.load_local(local_faiss_path, embed_model, allow_dangerous_deserialization=True)
+                    docs = [doc for doc in faiss_db.docstore._dict.values()]
                     logging.info(f"✅ S3 캐시에서 FAISS DB 다운로드 및 로드 성공")
                 except Exception as e:
                     logging.warning(f"⚠️ S3 캐시 로드 실패, 재생성 시도: {e}")
