@@ -31,22 +31,18 @@ from core.llm_chains import (
 )
 from core.faiss_manager import CHUNK_CACHE_DIR
 
-# --- ✨✨✨ S3 설정 추가 ✨✨✨ ---
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "factseeker-faiss-db")
 try:
     s3 = boto3.client('s3')
 except Exception as e:
     s3 = None
     logging.error(f"S3 클라이언트 초기화 실패: {e}")
-# --- ✨✨✨ S3 설정 종료 ✨✨✨ ---
-
 
 MAX_CLAIMS_TO_FACT_CHECK = 10
-DISTANCE_THRESHOLD = 0.8  # L2 거리 임계값
+DISTANCE_THRESHOLD = 0.8
 
 embed_model = OpenAIEmbeddings(model="text-embedding-3-small", request_timeout=60, max_retries=5, chunk_size=500)
 
-# --- ✨✨✨ S3 업로드/다운로드 함수 추가 ✨✨✨ ---
 def upload_to_s3(local_dir, s3_key):
     if not s3:
         logging.warning("S3 클라이언트가 없어 업로드를 건너뜁니다.")
@@ -54,7 +50,6 @@ def upload_to_s3(local_dir, s3_key):
     for root, _, files in os.walk(local_dir):
         for file in files:
             local_path = os.path.join(root, file)
-            # s3_key는 디렉토리처럼 작동하므로 파일 이름을 추가합니다.
             s3_path = os.path.join(s3_key, file)
             try:
                 s3.upload_file(local_path, S3_BUCKET_NAME, s3_path)
@@ -67,34 +62,24 @@ def download_from_s3(local_dir, s3_key):
         logging.warning("S3 클라이언트가 없어 다운로드를 건너뜁니다.")
         return False
     try:
-        # S3 키(폴더) 아래의 모든 객체를 나열합니다.
         response = s3.list_objects_v2(Bucket=S3_BUCKET_NAME, Prefix=s3_key)
         if 'Contents' not in response:
-            return False # S3에 파일이 없음
-
+            return False
         os.makedirs(local_dir, exist_ok=True)
         for obj in response['Contents']:
             s3_path = obj['Key']
-            # s3_key prefix를 제거하여 로컬 파일 경로를 만듭니다.
             relative_path = os.path.relpath(s3_path, s3_key)
             local_path = os.path.join(local_dir, relative_path)
-            
-            # 파일이 위치할 로컬 디렉토리가 없으면 생성합니다.
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
-            
             s3.download_file(S3_BUCKET_NAME, s3_path, local_path)
         return True
     except ClientError as e:
-        # 404 (Not Found)는 파일이 없는 것이므로 오류가 아닙니다.
         if e.response['Error']['Code'] == '404':
             return False
         logging.error(f"S3 다운로드 중 오류 발생: s3://{S3_BUCKET_NAME}/{s3_key} - {e}")
         return False
-# --- ✨✨✨ S3 함수 종료 ✨✨✨ ---
-
 
 async def get_article_text_safe(url):
-    """기사 본문 병렬 크롤링 시 예외 안전 래퍼"""
     try:
         text = await get_article_text(url)
         return url, text
@@ -113,14 +98,13 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
         summarized_query = claim
 
     search_results = await search_news_google_cs(summarized_query)
-
     cse_titles = [clean_news_title(item.get('title', '')) for item in search_results[:10]]
     cse_raw_titles = [item.get('title', '') for item in search_results[:10]]
     cse_urls = [item.get('link') for item in search_results[:10]]
     cse_title_embs = embed_model.embed_documents(cse_titles)
 
     matched_urls = {}
-    for idx, faiss_dir in enumerate(faiss_partition_dirs):
+    for faiss_dir in faiss_partition_dirs:
         faiss_index_path = os.path.join(faiss_dir, "index.faiss")
         faiss_pkl_path = os.path.join(faiss_dir, "index.pkl")
         if not (os.path.exists(faiss_index_path) and os.path.exists(faiss_pkl_path)):
@@ -212,7 +196,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         logging.info(f"✂️ 중복 제거 후 최종 팩트체크 대상 주장 {len(claims_to_check)}개: {claims_to_check}")
 
         if not claims_to_check:
-             return {
+            return {
                 "video_id": video_id,
                 "video_url": youtube_url,
                 "video_total_confidence_score": 0,
@@ -225,12 +209,10 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
     async def process_claim_step(idx, claim):
         logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
-
-        # --- ✨✨✨ FAISS 생성/로드 로직 수정 ✨✨✨ ---
         claim_hash = hashlib.md5(claim.encode()).hexdigest()
         s3_key = f"claim_faiss_cache/{claim_hash}"
         local_faiss_path = os.path.join(CHUNK_CACHE_DIR, s3_key)
-        
+
         faiss_db = None
         docs = None
 
@@ -267,12 +249,12 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                     "claim": claim, "result": "insufficient_evidence",
                     "confidence_score": 0, "evidence": []
                 }
-            
+
             os.makedirs(local_faiss_path, exist_ok=True)
             faiss_db = FAISS.from_documents(docs, embed_model)
             faiss_db.save_local(local_faiss_path)
             logging.info(f"✅ FAISS DB 새로 생성 및 로컬 저장 완료: {local_faiss_path}")
-            
+
             try:
                 logging.info(f"🚀 S3에 FAISS 인덱스 업로드 시도: s3://{S3_BUCKET_NAME}/{s3_key}")
                 upload_to_s3(local_faiss_path, s3_key)
@@ -280,10 +262,11 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             except Exception as e:
                 logging.error(f"❌ S3 업로드 실패: {e}")
 
-        if not docs: # 캐시에서 로드한 경우 docs가 None이므로 새로 채워야 함
+        if not docs:
             docs = [doc for doc_id, doc in faiss_db.docstore._dict.items()]
-        # --- ✨✨✨ 로직 수정 종료 ✨✨✨ ---
 
+        # --- ✨✨✨ 여기서 동일 claim 내 evidence URL 중복 제거 ✨✨✨ ---
+        url_set = set()
         validated_evidence = []
         fact_checker = build_factcheck_chain()
 
@@ -300,9 +283,16 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
                 if relevance and fact_check_result_match and justification:
                     fact_check_result_text = fact_check_result_match.group(1).strip()
-                    if "예" in relevance.group(1) and "아니오" not in fact_check_result_text:
+                    url = doc.metadata.get("url")
+                    if (
+                        "예" in relevance.group(1)
+                        and "아니오" not in fact_check_result_text
+                        and url
+                        and url not in url_set
+                    ):
+                        url_set.add(url)
                         return {
-                            "url": doc.metadata.get("url"),
+                            "url": url,
                             "relevance": "yes",
                             "fact_check_result": fact_check_result_text,
                             "justification": justification.group(1).strip(),
@@ -355,7 +345,6 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         "channel_type": channel_type,
         "channel_type_reason": reason
     }
-
 
 def parse_channel_type(llm_output: str):
     channel_type_match = re.search(r"채널 유형:\s*(.+)", llm_output)
