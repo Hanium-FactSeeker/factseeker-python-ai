@@ -31,21 +31,24 @@ from core.llm_chains import (
 )
 from core.faiss_manager import CHUNK_CACHE_DIR
 
+# --- 설정값 ---
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "factseeker-faiss-db")
+MAX_CLAIMS_TO_FACT_CHECK = 10
+MAX_ARTICLES_PER_CLAIM = 15  # ✨ 주장당 최대 검색 기사 수 (이 값을 조절하세요) ✨
+DISTANCE_THRESHOLD = 0.8
+# --- 설정값 끝 ---
+
 try:
     s3 = boto3.client('s3')
 except Exception as e:
     s3 = None
     logging.error(f"S3 클라이언트 초기화 실패: {e}")
 
-MAX_CLAIMS_TO_FACT_CHECK = 10
-DISTANCE_THRESHOLD = 0.8
-
 embed_model = OpenAIEmbeddings(
     model="text-embedding-3-small", request_timeout=60, max_retries=5, chunk_size=500
 )
 
-# --- 🔥 URL 기반 캐시 경로 및 S3 동기화 ---
+# --- URL 기반 캐시 경로 및 S3 동기화 ---
 def url_to_cache_key(url):
     return hashlib.md5(url.encode()).hexdigest()
 
@@ -88,7 +91,7 @@ def download_from_s3(local_dir, s3_key):
         logging.error(f"S3 다운로드 중 오류 발생: s3://{S3_BUCKET_NAME}/{s3_key} - {e}")
         return False
 
-# --- 🔥 기사 URL 기준 FAISS 생성/로드 ---
+# --- 기사 URL 기준 FAISS 생성/로드 ---
 async def ensure_article_faiss(url):
     """기사 본문을 벡터화하여 캐시(S3/로컬)에 저장, 있으면 로드"""
     cache_key = url_to_cache_key(url)
@@ -96,24 +99,25 @@ async def ensure_article_faiss(url):
     faiss_path = os.path.join(local_path, "index.faiss")
     pkl_path = os.path.join(local_path, "index.pkl")
     s3_key = f"article_faiss_cache/{cache_key}"
-    # 1. 로컬
+
     if os.path.exists(faiss_path) and os.path.exists(pkl_path):
         try:
             return FAISS.load_local(local_path, embed_model, allow_dangerous_deserialization=True)
         except Exception as e:
             shutil.rmtree(local_path, ignore_errors=True)
             logging.warning(f"로컬 캐시 손상, 재생성 시도: {e}")
-    # 2. S3
+            
     if s3 is not None and download_from_s3(local_path, s3_key):
         try:
             return FAISS.load_local(local_path, embed_model, allow_dangerous_deserialization=True)
         except Exception as e:
             shutil.rmtree(local_path, ignore_errors=True)
             logging.warning(f"S3 캐시 손상, 재생성 시도: {e}")
-    # 3. 새로 생성
+            
     text = await get_article_text(url)
     if not text or len(text) < 200:
         return None
+        
     doc = Document(page_content=text, metadata={"url": url})
     faiss_db = FAISS.from_documents([doc], embed_model)
     faiss_db.save_local(local_path)
@@ -124,7 +128,7 @@ async def ensure_article_faiss(url):
             logging.warning(f"S3 업로드 실패: {e}")
     return faiss_db
 
-# --- 🔥 CSE → FAISS에서 여러 기사, url 기준 중복 없는 문서만 수집 ---
+# --- CSE → FAISS에서 여러 기사, url 기준 중복 없는 문서만 수집 ---
 async def search_and_retrieve_docs(claim, faiss_partition_dirs):
     summarizer = build_claim_summarizer()
     try:
@@ -143,41 +147,45 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
 
     matched_urls = {}
 
-    # --- ✨ FAISS 탐색 로그 추가 시작 ---
     logging.info(f"🔎 FAISS DB 유사 기사 탐색 시작 (파티션 개수: {len(faiss_partition_dirs)})")
     for faiss_dir in faiss_partition_dirs:
         faiss_index_path = os.path.join(faiss_dir, "index.faiss")
-        faiss_pkl_path = os.path.join(faiss_dir, "index.pkl")
-        if not (os.path.exists(faiss_index_path) and os.path.exists(faiss_pkl_path)):
+        if not os.path.exists(faiss_index_path):
             continue
+            
         try:
             title_faiss_db = FAISS.load_local(
                 faiss_dir, embeddings=embed_model, allow_dangerous_deserialization=True
             )
-            # k=3이상: 여러 기사 반환!
-            D, I = title_faiss_db.index.search(np.array(cse_title_embs, dtype=np.float32), k=3)
-            for j in range(len(cse_title_embs)):
-                for i, dist in enumerate(D[j]):
-                    if dist < DISTANCE_THRESHOLD:
-                        faiss_idx = I[j][i]
-                        docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
-                        doc = title_faiss_db.docstore._dict[docstore_id]
-                        url = doc.metadata.get("url")
-                        if url and url not in matched_urls:
-                            matched_urls[url] = {
-                                "matched_cse_title": cse_titles[j],
-                                "raw_cse_title": cse_raw_titles[j]
-                            }
+            if title_faiss_db.index.ntotal > 0:
+                D, I = title_faiss_db.index.search(np.array(cse_title_embs, dtype=np.float32), k=3)
+                for j in range(len(cse_title_embs)):
+                    for i, dist in enumerate(D[j]):
+                        if dist < DISTANCE_THRESHOLD:
+                            faiss_idx = I[j][i]
+                            docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
+                            doc = title_faiss_db.docstore._dict[docstore_id]
+                            url = doc.metadata.get("url")
+                            if url and url not in matched_urls:
+                                matched_urls[url] = {
+                                    "matched_cse_title": cse_titles[j],
+                                    "raw_cse_title": cse_raw_titles[j]
+                                }
         except Exception as e:
             logging.error(f"FAISS 파티션 {faiss_dir} 검색 실패: {e}")
-    logging.info(f"🔎 FAISS 유사 기사 탐색 완료 - 매칭 기사 수: {len(matched_urls)}개")
-    # --- ✨ FAISS 탐색 로그 추가 끝 ---
+
+        # 조기 중단 로직
+        if len(matched_urls) >= MAX_ARTICLES_PER_CLAIM:
+            logging.info(f"목표 기사 수({MAX_ARTICLES_PER_CLAIM}개) 도달, 파티션 탐색을 중단합니다.")
+            break
+
+    logging.info(f"🔎 FAISS 유사 기사 탐색 완료 - 최종 매칭 기사 수: {len(matched_urls)}개")
 
     article_urls = list(matched_urls.keys())
     coros = [ensure_article_faiss(url) for url in article_urls]
     faiss_dbs = await asyncio.gather(*coros)
     docs = []
-    for idx, faiss_db in enumerate(faiss_dbs):
+    for faiss_db in faiss_dbs:
         if faiss_db:
             doc_list = [doc for doc in faiss_db.docstore._dict.values()]
             for doc in doc_list:
@@ -191,7 +199,7 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
                             "raw_cse_title": matched_urls[url]["raw_cse_title"]
                         }
                     ))
-    logging.info(f"📰 최종 크롤링 성공 문서 수: {len(docs)}")
+    logging.info(f"📰 최종 크롤링 및 캐싱 성공 문서 수: {len(docs)}")
     return docs
 
 async def run_fact_check(youtube_url, faiss_partition_dirs):
@@ -255,7 +263,6 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
     async def process_claim_step(idx, claim):
         logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
-        # --- 🔥 기사 URL 캐시/탐색만 ---
         docs = await search_and_retrieve_docs(claim, faiss_partition_dirs)
         if not docs:
             logging.info(f"근거 문서를 찾지 못함: '{claim}'")
@@ -264,7 +271,6 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 "confidence_score": 0, "evidence": []
             }
 
-        # --- 동일 claim 내 증거 URL 중복 제거 ---
         url_set = set()
         validated_evidence = []
         fact_checker = build_factcheck_chain()
@@ -314,7 +320,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             "claim": claim,
             "result": "likely_true" if validated_evidence else "insufficient_evidence",
             "confidence_score": confidence_score,
-            "evidence": validated_evidence[:3]  # 최대 3개만 evidence
+            "evidence": validated_evidence[:3]
         }
 
     claim_tasks = [
