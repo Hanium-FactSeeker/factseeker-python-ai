@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 # core 폴더의 필요한 함수들을 가져옵니다.
-from core.fact_checker import run_fact_check
+from services.fact_checker import run_fact_check
 from core.preload_s3_faiss import preload_faiss_from_existing_s3, CHUNK_CACHE_DIR
 
 # .env 파일에서 환경 변수를 로드합니다.
