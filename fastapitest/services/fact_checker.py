@@ -143,7 +143,15 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
     cse_titles = [clean_news_title(item.get('title', '')) for item in search_results[:10]]
     cse_raw_titles = [item.get('title', '') for item in search_results[:10]]
     cse_urls = [item.get('link') for item in search_results[:10]]
+    
+    # 검색할 제목이 없으면 바로 종료
+    if not cse_titles:
+        logging.warning("Google 검색 결과에서 제목을 찾을 수 없어 탐색을 종료합니다.")
+        return []
+        
     cse_title_embs = embed_model.embed_documents(cse_titles)
+    # 검색할 벡터 배열 준비
+    search_vectors = np.array(cse_title_embs, dtype=np.float32)
 
     matched_urls = {}
 
@@ -154,30 +162,50 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
             continue
             
         try:
+            # --- ✨✨✨ 진단 로그 시작 ✨✨✨ ---
+            logging.info(f"--- 파티션 검사 시작: [{faiss_dir}] ---")
+            
             title_faiss_db = FAISS.load_local(
                 faiss_dir, embeddings=embed_model, allow_dangerous_deserialization=True
             )
-            if title_faiss_db.index.ntotal > 0:
-                D, I = title_faiss_db.index.search(np.array(cse_title_embs, dtype=np.float32), k=3)
-                for j in range(len(cse_title_embs)):
-                    for i, dist in enumerate(D[j]):
-                        if dist < DISTANCE_THRESHOLD:
-                            faiss_idx = I[j][i]
-                            docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
-                            doc = title_faiss_db.docstore._dict[docstore_id]
-                            url = doc.metadata.get("url")
-                            if url and url not in matched_urls:
-                                matched_urls[url] = {
-                                    "matched_cse_title": cse_titles[j],
-                                    "raw_cse_title": cse_raw_titles[j]
-                                }
-        except Exception as e:
-            logging.error(f"FAISS 파티션 {faiss_dir} 검색 실패: {e}")
+            
+            # 1. FAISS 인덱스 객체 자체를 확인합니다.
+            index_object = title_faiss_db.index
+            if index_object:
+                # 2. 인덱스 내 벡터의 총 개수(ntotal)를 확인합니다.
+                vector_count = index_object.ntotal
+                logging.info(f"[{faiss_dir}] 로드 성공. 벡터 개수(ntotal): {vector_count}")
 
-        # 조기 중단 로직
-        if len(matched_urls) >= MAX_ARTICLES_PER_CLAIM:
-            logging.info(f"목표 기사 수({MAX_ARTICLES_PER_CLAIM}개) 도달, 파티션 탐색을 중단합니다.")
-            break
+                # 3. 벡터가 실제로 있을 때만 검색을 시도합니다.
+                if vector_count > 0:
+                    # 4. 검색할 벡터의 상태를 확인합니다.
+                    logging.info(f"[{faiss_dir}] 검색 실행 -> 검색 대상 벡터 shape: {search_vectors.shape}, dtype: {search_vectors.dtype}")
+                    
+                    D, I = index_object.search(search_vectors, k=3) # .index로 직접 접근
+                    
+                    logging.info(f"[{faiss_dir}] 검색 성공!") # 이 로그가 뜨면 에러 없이 통과한 것
+                    
+                    for j in range(len(cse_title_embs)):
+                        for i, dist in enumerate(D[j]):
+                            if dist < DISTANCE_THRESHOLD:
+                                faiss_idx = I[j][i]
+                                docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
+                                doc = title_faiss_db.docstore._dict[docstore_id]
+                                url = doc.metadata.get("url")
+                                if url and url not in matched_urls:
+                                    matched_urls[url] = {
+                                        "matched_cse_title": cse_titles[j],
+                                        "raw_cse_title": cse_raw_titles[j]
+                                    }
+                else:
+                    logging.warning(f"[{faiss_dir}] 벡터 개수가 0이므로 검색을 건너뜁니다.")
+            else:
+                logging.error(f"[{faiss_dir}] FAISS 인덱스 객체(.index) 로드 실패!")
+            # --- ✨✨✨ 진단 로그 끝 ✨✨✨ ---
+
+        except Exception as e:
+            # 에러 발생 시, 어떤 파티션에서 어떤 이유로 실패했는지 더 상세히 기록합니다.
+            logging.error(f"❌ FAISS 파티션 [{faiss_dir}] 처리 중 심각한 오류 발생: {e}", exc_info=True)
 
     logging.info(f"🔎 FAISS 유사 기사 탐색 완료 - 최종 매칭 기사 수: {len(matched_urls)}개")
 
