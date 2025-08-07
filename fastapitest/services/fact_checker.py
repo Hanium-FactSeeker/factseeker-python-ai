@@ -140,7 +140,7 @@ async def ensure_article_faiss(url):
         return faiss_db
 
 # --- CSE → FAISS에서 여러 기사, url 기준 중복 없는 문서만 수집 (한도 즉시 중단) ---
-async def search_and_retrieve_docs(claim, faiss_partition_dirs):
+async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
     summarizer = build_claim_summarizer()
     try:
         summary_result = await summarizer.ainvoke({"claim": claim})
@@ -151,57 +151,90 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
         summarized_query = claim
 
     search_results = await search_news_google_cs(summarized_query)
-    cse_titles = [clean_news_title(item.get('title', '')) for item in search_results[:10]]
-    cse_raw_titles = [item.get('title', '') for item in search_results[:10]]
-    cse_urls = [item.get('link') for item in search_results[:10]]
-    
+    cse_titles = [clean_news_title(item.get('title', '')) for item in search_results[:20]]
+    cse_raw_titles = [item.get('title', '') for item in search_results[:20]]
+    cse_urls = [item.get('link') for item in search_results[:20]]
+
     if not cse_titles:
         logging.warning("Google 검색 결과에서 제목을 찾을 수 없어 탐색을 종료합니다.")
         return []
-        
+
     cse_title_embs = embed_model.embed_documents(cse_titles)
     search_vectors = np.array(cse_title_embs, dtype=np.float32)
-
     matched_urls = {}
-    limit_reached = False
 
-    logging.info(f"🔎 FAISS DB 유사 기사 탐색 시작 (파티션 개수: {len(faiss_partition_dirs)})")
     for faiss_dir in faiss_partition_dirs:
-        faiss_index_path = os.path.join(faiss_dir, "index.faiss")
-        if not os.path.exists(faiss_index_path):
-            continue
-            
         try:
             title_faiss_db = FAISS.load_local(
                 faiss_dir, embeddings=embed_model, allow_dangerous_deserialization=True
             )
-            if title_faiss_db.index.ntotal > 0:
-                D, I = title_faiss_db.index.search(search_vectors, k=3)
-                for j in range(len(cse_title_embs)):
-                    for i, dist in enumerate(D[j]):
-                        if dist < DISTANCE_THRESHOLD:
-                            faiss_idx = I[j][i]
-                            docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
-                            doc = title_faiss_db.docstore._dict[docstore_id]
-                            url = doc.metadata.get("url")
-                            if url and url not in matched_urls:
-                                matched_urls[url] = {
-                                    "matched_cse_title": cse_titles[j],
-                                    "raw_cse_title": cse_raw_titles[j]
-                                }
-                                if len(matched_urls) >= MAX_ARTICLES_PER_CLAIM:
-                                    limit_reached = True
-                                    break
-                    if limit_reached:
-                        break
-        except Exception as e:
-            logging.error(f"FAISS 파티션 {faiss_dir} 검색 실패: {e}")
+            if title_faiss_db.index.ntotal == 0:
+                continue
 
-        if limit_reached:
-            logging.info(f"목표 기사 수({MAX_ARTICLES_PER_CLAIM}개) 도달, 모든 파티션 탐색을 중단합니다.")
+            D, I = title_faiss_db.index.search(search_vectors, k=3)
+            for j in range(len(cse_title_embs)):
+                for i, dist in enumerate(D[j]):
+                    if dist < DISTANCE_THRESHOLD:
+                        faiss_idx = I[j][i]
+                        docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
+                        doc = title_faiss_db.docstore._dict[docstore_id]
+                        url = doc.metadata.get("url")
+                        if url and url not in seen_urls and url not in matched_urls:
+                            matched_urls[url] = {
+                                "matched_cse_title": cse_titles[j],
+                                "raw_cse_title": cse_raw_titles[j]
+                            }
+        except Exception as e:
+            logging.error(f"FAISS 검색 실패: {faiss_dir} → {e}")
+
+    article_urls = list(matched_urls.keys())
+    docs = []
+
+    for url in article_urls:
+        faiss_db = await ensure_article_faiss(url)
+        if faiss_db:
+            for doc in faiss_db.docstore._dict.values():
+                actual_url = doc.metadata.get("url")
+                if actual_url and actual_url not in seen_urls:
+                    docs.append(Document(
+                        page_content=doc.page_content,
+                        metadata={
+                            "url": actual_url,
+                            "matched_cse_title": matched_urls[actual_url]["matched_cse_title"],
+                            "raw_cse_title": matched_urls[actual_url]["raw_cse_title"]
+                        }
+                    ))
+                    break
+    return docs
+
+# --- 본문 확보된 뉴스 15개가 될 때까지 반복 확보 ---
+async def search_and_retrieve_docs(claim, faiss_partition_dirs):
+    collected_docs = []
+    seen_urls = set()
+    attempt_count = 0
+
+    while len(collected_docs) < MAX_ARTICLES_PER_CLAIM:
+        attempt_count += 1
+        logging.info(f"🔁 뉴스 수집 시도 {attempt_count}회 - 확보된 기사 수: {len(collected_docs)}")
+
+        new_docs = await search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls)
+
+        if not new_docs:
+            logging.warning(f"📭 수집된 문서 없음. 반복 진행 중... (현재 확보: {len(collected_docs)})")
+
+        for doc in new_docs:
+            url = doc.metadata.get("url")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                collected_docs.append(doc)
+                logging.info(f"✅ 기사 확보: {url} ({len(collected_docs)}/{MAX_ARTICLES_PER_CLAIM})")
+
+        if attempt_count > 30 and len(collected_docs) < MAX_ARTICLES_PER_CLAIM:
+            logging.error("🚨 30회 이상 반복했지만 15개 확보 실패. 중단합니다.")
             break
 
-    logging.info(f"🔎 FAISS 유사 기사 탐색 완료 - 최종 매칭 기사 수: {len(matched_urls)}개")
+    logging.info(f"📰 최종 확보된 문서 수: {len(collected_docs)}개")
+    return collected_docs[:MAX_ARTICLES_PER_CLAIM]
 
     article_urls = list(matched_urls.keys())
     coros = [ensure_article_faiss(url) for url in article_urls]
