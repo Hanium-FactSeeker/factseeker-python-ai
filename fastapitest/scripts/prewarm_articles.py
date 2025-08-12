@@ -54,6 +54,31 @@ def _urls_from_partitions(parts: List[str]) -> List[str]:
     return urls
 
 
+def _barrier_path() -> str:
+    return os.path.join(CHUNK_CACHE_DIR, ".preload.lock")
+
+
+def _acquire_preload_barrier():
+    os.makedirs(CHUNK_CACHE_DIR, exist_ok=True)
+    path = _barrier_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+        logging.info(f"🔒 프리로드 배리어 생성: {path}")
+    except Exception as e:
+        logging.warning(f"프리로드 배리어 생성 실패(무시): {e}")
+
+
+def _release_preload_barrier():
+    path = _barrier_path()
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            logging.info("🔓 프리로드 배리어 해제")
+    except Exception as e:
+        logging.warning(f"프리로드 배리어 해제 실패(무시): {e}")
+
+
 def _expected_partitions_from_s3(prefix: str) -> Set[str]:
     """S3에서 기대되는 파티션 디렉터리 이름 집합을 계산(.faiss 기준)."""
     parts: Set[str] = set()
@@ -134,8 +159,12 @@ async def _bounded_prewarm(urls: List[str], concurrency: int, min_delay: float, 
 async def main_async(prefix: str, source: str, url_file: str | None, limit: int, concurrency: int, partition_number: int | None, min_delay: float, max_delay: float, preload_wait_timeout: float, preload_poll_interval: float):
     if source == "partitions":
         logging.info(f"🚀 제목 FAISS S3 프리로드 시작 (prefix={prefix})")
-        preload_faiss_from_existing_s3(prefix)
-        await _wait_until_preload_complete(prefix, timeout_sec=preload_wait_timeout, poll_interval_sec=preload_poll_interval)
+        _acquire_preload_barrier()
+        try:
+            preload_faiss_from_existing_s3(prefix)
+            await _wait_until_preload_complete(prefix, timeout_sec=preload_wait_timeout, poll_interval_sec=preload_poll_interval)
+        finally:
+            _release_preload_barrier()
         parts = _find_partitions(target_partition=partition_number)
         logging.info(f"🔢 감지된 파티션 수: {len(parts)}")
         urls = _urls_from_partitions(parts)
