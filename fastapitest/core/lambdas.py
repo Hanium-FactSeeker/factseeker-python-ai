@@ -24,6 +24,98 @@ import yt_dlp
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+def _clean_text(text: str) -> str:
+    """
+    불필요한 공백과 연속된 줄바꿈을 제거하고, 저작권 문구를 제거합니다.
+    """
+    # 여러 개의 공백을 하나의 공백으로
+    text = re.sub(r'\s+', ' ', text).strip()
+    # 연속된 줄바꿈을 최대 두 개로 제한
+    text = re.sub(r'(\n){3,}', '\n\n', text)
+    # 저작권 문구 제거 (예시 패턴, 필요에 따라 추가 가능)
+    text = re.sub(r'Copyright\s*.*무단전재.*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'©\s*.*All rights reserved.*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'저작권자\s*.*무단복제.*', '', text, flags=re.IGNORECASE)
+    return text.strip()
+
+def _extract_article_content_with_selectors(html_content: str, url: str) -> str:
+    """
+    뉴스 HTML에서 특정 언론사별 CSS 선택자를 사용하여 기사 본문을 추출합니다.
+    """
+    # 경향신문 URL 변환
+    if "news.khan.co.kr/kh_news/khan_art_view.html" in url:
+        match = re.search(r'artid=(\d+)', url)
+        if match:
+            art_id = match.group(1)
+            url = f"https://www.khan.co.kr/article/{art_id}"
+
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc
+
+    # 도메인별 CSS 선택자 매핑
+    selectors = {
+        "hani.co.kr": "div.article-text p.text",
+        "khan.co.kr": "#articleBody p.content_text",
+        "segye.com": "article.viewBox2",
+        "hankookilbo.com": "div.col-main p.read",
+        "asiatoday.co.kr": "div.news_bm",
+        "seoul.co.kr": "div.viewContent",
+        "donga.com": "section.news_view",
+        "naeil.com": "div.article-view p",
+    }
+
+    selector = None
+    for dom, sel in selectors.items():
+        if dom in domain:
+            selector = sel
+            break
+
+    if not selector:
+        return "" # 지원하지 않는 언론사 도메인일 경우 빈 문자열 반환
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+    article_elements = []
+
+    # 특정 선택자에 따라 처리 방식 분리
+    if domain in ["hani.co.kr", "khan.co.kr", "hankookilbo.com", "naeil.com"]:
+        # p 태그가 직접 본문 내용을 포함하는 경우
+        elements = soup.select(selector)
+        for p_tag in elements:
+            # <br> 태그를 \n으로 변환
+            for br in p_tag.find_all('br'):
+                br.replace_with('\\n')
+            text = p_tag.get_text(separator=' ').strip()
+            if text: # 빈 문자열은 추가하지 않음
+                article_elements.append(text)
+    elif domain in ["segye.com", "asiatoday.co.kr", "seoul.co.kr", "donga.com"]:
+        # 전체 본문 영역을 선택하고 내부 텍스트를 추출
+        main_content_div = soup.select_one(selector)
+        if main_content_div:
+            # 불필요한 태그 제거 (광고, 스크립트, 스타일, 이미지, 테이블 등)
+            for tag in main_content_div.find_all(['script', 'style', 'img', 'table', 'figure', 'figcaption', 'aside', 'nav', 'footer', 'header', 'iframe', 'video', 'audio', 'meta', 'link', 'form', 'input', 'button', 'select', 'textarea', 'svg', 'canvas', 'map', 'area', 'object', 'param', 'embed', 'source', 'track', 'picture', 'portal', 'slot', 'template', 'noscript', 'ins', 'del', 'bdo', 'bdi', 'rp', 'rt', 'rtc', 'ruby', 'data', 'time', 'mark', 'small', 'sub', 'sup', 'abbr', 'acronym', 'address', 'b', 'big', 'blockquote', 'center', 'cite', 'code', 'dd', 'dfn', 'dir', 'dl', 'dt', 'em', 'font', 'i', 'kbd', 'li', 'menu', 'ol', 'pre', 'q', 's', 'samp', 'strike', 'strong', 'tt', 'u', 'var', 'ul', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                tag.decompose()
+            
+            # <br> 태그를 \n으로 변환
+            for br in main_content_div.find_all('br'):
+                br.replace_with('\\n')
+
+            # p 태그를 기준으로 문단 분리
+            paragraphs = []
+            for content in main_content_div.contents:
+                if content.name == 'p':
+                    text = content.get_text(separator=' ').strip()
+                    if text:
+                        paragraphs.append(text)
+                elif isinstance(content, str) and content.strip():
+                    paragraphs.append(content.strip())
+            
+            article_elements = paragraphs
+    
+    # 추출된 문단들을 결합
+    full_text = '\n\n'.join(filter(None, article_elements))
+    
+    return full_text
+
 def extract_video_id(url: str):
     """
     유튜브 URL에서 11자리 video_id를 추출합니다.
@@ -150,7 +242,7 @@ def extract_chosun_with_selenium(url: str):
                 text = p.get_text(strip=True)
                 if text and not any(k in text for k in ["chosun.com", "기자", "Copyright", "무단전재"]):
                     article_content.append(text)
-            full_text = "\n".join(article_content)
+            full_text = "\\n".join(article_content)
             
             if full_text and len(full_text) > 100:
                 logging.info("✅ Selenium으로 본문 추출 성공")
@@ -164,10 +256,101 @@ def extract_chosun_with_selenium(url: str):
             
     except (TimeoutException, NoSuchElementException) as e:
         logging.error(f"❌ Selenium 크롤링 중 요소 탐색 실패 또는 타임아웃: {e}")
-        return None
+        return ""
     except Exception as e:
         logging.exception(f"❌ Selenium 크롤링 중 오류 발생: {e}")
-        return None
+        return ""
+    finally:
+        if driver:
+            driver.quit()
+
+def _extract_generic_with_selenium(url: str) -> str:
+    """
+    Selenium을 사용하여 일반적인 기사 본문을 추출합니다.
+    """
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
+    driver = None
+    try:
+        logging.info(f"📰 Selenium (Generic)으로 크롤링 시도: {url}")
+        service = Service("/usr/local/bin/chromedriver")
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.get(url)
+        wait = WebDriverWait(driver, 10)
+        
+        # 일반적인 기사 본문 선택자들 (다양한 언론사에 적용될 수 있도록)
+        generic_article_selectors = [
+            "div.article_content", "div#articleBodyContents", "div#article_body", 
+            "div.news_content", "article.article_view", "div.view_content",
+            "div.article-text", "div.article-body", "div.entry-content",
+            "div.contents_area", "div.news_view", "div.viewContent",
+            "article.viewBox2", "div.col-main", "div.news_bm", "section.news_view",
+            "div.article-view"
+        ]
+        
+        # 페이지 로드를 기다리거나, 본문 요소 중 하나가 나타날 때까지 기다립니다.
+        try:
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ", ".join(generic_article_selectors))))
+        except TimeoutException:
+            logging.warning(f"⚠️ Selenium (Generic): 본문 요소가 10초 내에 로드되지 않았습니다. 전체 페이지 소스 사용.")
+
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        
+        article_body_container = None
+        for selector in generic_article_selectors:
+            article_body_container = soup.select_one(selector)
+            if article_body_container:
+                break
+        
+        if article_body_container:
+            # 불필요한 태그 제거 (광고, 스크립트, 스타일, 이미지, 테이블 등)
+            for tag in article_body_container.find_all(['script', 'style', 'img', 'table', 'figure', 'figcaption', 'aside', 'nav', 'footer', 'header', 'iframe', 'video', 'audio', 'meta', 'link', 'form', 'input', 'button', 'select', 'textarea', 'svg', 'canvas', 'map', 'area', 'object', 'param', 'embed', 'source', 'track', 'picture', 'portal', 'slot', 'template', 'noscript', 'ins', 'del', 'bdo', 'bdi', 'rp', 'rt', 'rtc', 'ruby', 'data', 'time', 'mark', 'small', 'sub', 'sup', 'abbr', 'acronym', 'address', 'b', 'big', 'blockquote', 'center', 'cite', 'code', 'dd', 'dfn', 'dir', 'dl', 'dt', 'em', 'font', 'i', 'kbd', 'li', 'menu', 'ol', 'pre', 'q', 's', 'samp', 'strike', 'strong', 'tt', 'u', 'var', 'ul', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                tag.decompose()
+            
+            # <br> 태그를 \n으로 변환
+            for br in article_body_container.find_all('br'):
+                br.replace_with('\\n')
+
+            # p 태그를 기준으로 문단 분리
+            paragraphs = []
+            for content in article_body_container.contents:
+                if content.name == 'p':
+                    text = content.get_text(separator=' ').strip()
+                    if text:
+                        paragraphs.append(text)
+                elif isinstance(content, str) and content.strip():
+                    paragraphs.append(content.strip())
+            
+            full_text = "\\n\\n".join(filter(None, paragraphs))
+
+            if full_text and len(full_text) > 100:
+                logging.info("✅ Selenium (Generic)으로 본문 추출 성공")
+                return full_text
+            else:
+                logging.warning("Selenium (Generic)으로 본문을 찾았으나 내용이 너무 짧거나 비어있습니다.")
+                return ""
+        else:
+            # 특정 본문 요소를 찾지 못했다면, 페이지의 모든 텍스트를 가져와서 시도
+            logging.warning("Selenium (Generic): 특정 본문 요소를 찾지 못했습니다. 페이지 전체 텍스트를 시도합니다.")
+            full_text = soup.get_text(separator='\\n', strip=True)
+            if full_text and len(full_text) > 100:
+                logging.info("✅ Selenium (Generic)으로 전체 페이지 텍스트 추출 성공")
+                return full_text
+            else:
+                logging.warning("Selenium (Generic)으로 전체 페이지 텍스트도 너무 짧거나 비어있습니다.")
+                return ""
+            
+    except (TimeoutException, NoSuchElementException) as e:
+        logging.error(f"❌ Selenium (Generic) 크롤링 중 요소 탐색 실패 또는 타임아웃: {e}")
+        return ""
+    except Exception as e:
+        logging.exception(f"❌ Selenium (Generic) 크롤링 중 오류 발생: {e}")
+        return ""
     finally:
         if driver:
             driver.quit()
@@ -190,7 +373,7 @@ async def get_article_text(url: str):
             text = await asyncio.to_thread(extract_chosun_with_selenium, url)
             if text and len(text) > 100:
                 logging.info("✅ Selenium으로 본문 추출 성공")
-                return text
+                return _clean_text(text) # Selenium 결과도 정제
             else:
                 logging.warning("⚠️ Selenium으로 본문 추출 실패 또는 내용이 불충분합니다. 다음 방법을 시도하지 않습니다.")
                 return None
@@ -213,7 +396,7 @@ async def get_article_text(url: str):
                 
                 if article.text and len(article.text) > 300:
                     logging.info(f"✅ newspaper로 기사 텍스트 추출 완료 ({len(article.text)}자): {url}")
-                    return article.text
+                    return _clean_text(article.text) # newspaper 결과 정제
                 else:
                     logging.warning(f"⚠️ newspaper 크롤링 결과가 불충분함. BeautifulSoup 폴백 시도: {url}")
     except aiohttp.ClientError as e:
@@ -221,33 +404,42 @@ async def get_article_text(url: str):
     except Exception as e:
         logging.warning(f"⚠️ newspaper 크롤링 실패. 다음 방법 시도: {url} -> {e}")
 
-    # requests + BeautifulSoup 폴백 시도
+    # requests + BeautifulSoup 폴백 시도 (언론사별 선택자 적용)
+    extracted_text_from_selectors = ""
     try:
-        logging.warning(f"⚠️ requests+BeautifulSoup으로 본문 추출 재시도: {url}")
+        logging.warning(f"⚠️ requests+BeautifulSoup으로 본문 추출 재시도 (언론사별 선택자 적용): {url}")
         response = requests.get(clean_url, headers=headers, timeout=30)
         response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
+        html_content = response.text
         
-        article_content = []
-        # 일반적인 언론사 본문 선택자
-        body_elements = soup.select('div.article_content, div#articleBodyContents, div#article_body, div.news_content, article.article_view, div.view_content')
-        for elem in body_elements:
-            text = elem.get_text(separator='\n', strip=True)
-            if text:
-                article_content.append(text)
+        # 언론사별 선택자를 사용하여 본문 추출
+        extracted_text_from_selectors = _extract_article_content_with_selectors(html_content, url)
 
-        full_text = '\n'.join([c for c in article_content if c])
-        if full_text and len(full_text) > 300:
-            logging.info(f"✅ requests+BeautifulSoup으로 본문 추출 완료 ({len(full_text)}자): {url}")
-            return full_text
+        if extracted_text_from_selectors and len(extracted_text_from_selectors) > 100:
+            cleaned_final_text = _clean_text(extracted_text_from_selectors)
+            logging.info(f"✅ requests+BeautifulSoup (언론사별)으로 본문 추출 완료 ({len(cleaned_final_text)}자): {url}")
+            return cleaned_final_text
         else:
-            logging.warning(f"⚠️ requests+BeautifulSoup로 본문 내용이 너무 짧음. 최종 실패.")
-            return None
+            logging.warning(f"⚠️ requests+BeautifulSoup (언론사별)로 본문 내용이 너무 짧음. 최종 폴백 시도.")
             
     except requests.exceptions.RequestException as e:
-        logging.warning(f"⚠️ requests+BeautifulSoup 실패. 최종 실패: {url} -> {e}")
+        logging.warning(f"⚠️ requests+BeautifulSoup (언론사별) 실패. 최종 폴백 시도: {url} -> {e}")
     except Exception as e:
-        logging.warning(f"⚠️ BeautifulSoup 파싱 실패. 최종 실패: {url} -> {e}")
+        logging.warning(f"⚠️ BeautifulSoup 파싱 실패 (언론사별). 최종 폴백 시도: {url} -> {e}")
+
+    # 최종 폴백: Selenium (Generic) 시도
+    logging.warning(f"⚠️ 모든 방법으로 본문 추출 실패. 최종 폴백: Selenium (Generic) 시도: {url}")
+    try:
+        text = await asyncio.to_thread(_extract_generic_with_selenium, url)
+        if text and len(text) > 100:
+            logging.info("✅ Selenium (Generic)으로 최종 본문 추출 성공")
+            return _clean_text(text) # Selenium 결과도 정제
+        else:
+            logging.warning("⚠️ Selenium (Generic)으로도 본문 추출 실패 또는 내용이 불충분합니다.")
+            return None
+    except Exception as e:
+        logging.error(f"❌ asyncio.to_thread Selenium (Generic) 실행 중 오류: {e}")
+        return None
 
     logging.error(f"❌ 모든 방법으로 기사 텍스트를 가져오기 실패: {url}")
     return None
@@ -257,7 +449,7 @@ def clean_news_title(title):
     뉴스 제목에서 언론사명, 슬로건, 특수 태그, 불필요한 기호 등을 제거하여 정제합니다.
     """
     patterns_to_remove = [
-        r'대한민국 오후를 여는 유일석간 문화일보', 
+        r'대한민국 오후를 여는 유일석간 문화일보',
         r'\| 문화일보', r'문화일보',
         r'\| 중앙일보', r'중앙일보',
         r'\| 경향신문', r'경향신문',
@@ -270,7 +462,7 @@ def clean_news_title(title):
     ]
 
     patterns_to_remove_regex = [
-        r'\[.*?\]',
+        r'\[.*\]',
         r'\(.*?\)',
         r'\{.*?\}',
         r'<[^>]+>',
@@ -278,7 +470,7 @@ def clean_news_title(title):
     ]
 
     symbols_to_remove = [
-        r'\|', r'\:', r'\_', r'\-', r'\+', r'=', r'/', r'\\'
+        r'\|', r':', r'_', r'-', r'\+', r'=', r'/', r'\\', r'\'', r'\"', r'‘', r'’', r'“', r'”', r'…', r'·', r'▲', r'▼', r'■', r'□', r'●', r'○', r'◆', r'◇', r'★', r'☆', r'※', r'!', r'@', r'#', r'$', r'%', r'^', r'&', r'\*', r'\(', r'\)', r'~', r'`', r'\{', r'\}', r'\[', r'\]', r';', r',', r'\.', r'<', r'>', r'?'
     ]
 
     cleaned_title = title
