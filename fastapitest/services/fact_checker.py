@@ -56,35 +56,7 @@ embed_model = OpenAIEmbeddings(
 # URL별 동시 처리를 막기 위한 잠금(Lock) 객체
 url_locks = {}
 
-# 제목 FAISS 인덱스 메모리 LRU 캐시
-TITLE_FAISS_CACHE = {}
-TITLE_FAISS_ORDER = []  # 가장 오래된 항목이 앞쪽
-MAX_TITLE_FAISS_CACHE_SIZE = int(os.environ.get("MAX_TITLE_FAISS_CACHE_SIZE", "8"))
-
-def load_title_faiss_cached(faiss_dir: str):
-    try:
-        cached = TITLE_FAISS_CACHE.get(faiss_dir)
-        if cached:
-            # LRU 갱신
-            if faiss_dir in TITLE_FAISS_ORDER:
-                TITLE_FAISS_ORDER.remove(faiss_dir)
-            TITLE_FAISS_ORDER.append(faiss_dir)
-            return cached
-
-        db = FAISS.load_local(faiss_dir, embeddings=embed_model, allow_dangerous_deserialization=True)
-        TITLE_FAISS_CACHE[faiss_dir] = db
-        TITLE_FAISS_ORDER.append(faiss_dir)
-        # 용량 초과 시 LRU 제거
-        while len(TITLE_FAISS_ORDER) > MAX_TITLE_FAISS_CACHE_SIZE:
-            old = TITLE_FAISS_ORDER.pop(0)
-            try:
-                TITLE_FAISS_CACHE.pop(old, None)
-            except Exception:
-                pass
-        return db
-    except Exception as e:
-        logging.error(f"제목 FAISS 로드 실패: {faiss_dir} → {e}")
-        return None
+ 
 
 # --- URL 기반 캐시 경로 및 S3 동기화 ---
 def url_to_cache_key(url):
@@ -224,7 +196,9 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
 
     for faiss_dir in sorted(faiss_partition_dirs, key=partition_num, reverse=True):
         try:
-            title_faiss_db = load_title_faiss_cached(faiss_dir)
+            title_faiss_db = FAISS.load_local(
+                faiss_dir, embeddings=embed_model, allow_dangerous_deserialization=True
+            )
             if title_faiss_db.index.ntotal == 0:
                 continue
 
@@ -337,37 +311,22 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
         except Exception as e:
             logging.error(f"키워드 직접 FAISS 검색 중 오류: {e}")
     docs = []
-
-    # 기사 본문 FAISS 병렬 로드 (과도한 병렬 방지용 제한)
-    MAX_CONCURRENT_ARTICLE_FETCH = int(os.environ.get("MAX_CONCURRENT_ARTICLE_FETCH", "3"))
-    sem = asyncio.Semaphore(MAX_CONCURRENT_ARTICLE_FETCH)
-
-    async def load_article(url):
-        async with sem:
-            return url, await ensure_article_faiss(url)
-
-    tasks = [load_article(url) for url in article_urls]
-    results = await asyncio.gather(*tasks)
-
-    # CSE 순서를 유지하며 문서 구성
-    faiss_by_url = {u: db for (u, db) in results if db}
     for url in article_urls:
-        faiss_db = faiss_by_url.get(url)
-        if not faiss_db:
-            continue
-        for doc in faiss_db.docstore._dict.values():
-            actual_url = doc.metadata.get("url")
-            if actual_url and actual_url not in seen_urls:
-                meta = matched_meta.get(actual_url, {"matched_cse_title": "", "raw_cse_title": ""})
-                docs.append(Document(
-                    page_content=doc.page_content,
-                    metadata={
-                        "url": actual_url,
-                        "matched_cse_title": meta["matched_cse_title"],
-                        "raw_cse_title": meta["raw_cse_title"]
-                    }
-                ))
-                break
+        faiss_db = await ensure_article_faiss(url)
+        if faiss_db:
+            for doc in faiss_db.docstore._dict.values():
+                actual_url = doc.metadata.get("url")
+                if actual_url and actual_url not in seen_urls:
+                    meta = matched_meta.get(actual_url, {"matched_cse_title": "", "raw_cse_title": ""})
+                    docs.append(Document(
+                        page_content=doc.page_content,
+                        metadata={
+                            "url": actual_url,
+                            "matched_cse_title": meta["matched_cse_title"],
+                            "raw_cse_title": meta["raw_cse_title"]
+                        }
+                    ))
+                    break
     return docs
 
 # --- 본문 확보된 뉴스 15개가 될 때까지 반복 확보 ---
@@ -398,27 +357,6 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
 
     logging.info(f"📰 최종 확보된 문서 수: {len(collected_docs)}개")
     return collected_docs[:MAX_ARTICLES_PER_CLAIM]
-
-    article_urls = list(matched_urls.keys())
-    coros = [ensure_article_faiss(url) for url in article_urls]
-    faiss_dbs = await asyncio.gather(*coros)
-    docs = []
-    for faiss_db in faiss_dbs:
-        if faiss_db:
-            doc_list = [doc for doc in faiss_db.docstore._dict.values()]
-            for doc in doc_list:
-                url = doc.metadata.get("url")
-                if url and url in matched_urls:
-                    docs.append(Document(
-                        page_content=doc.page_content,
-                        metadata={
-                            "url": url,
-                            "matched_cse_title": matched_urls[url]["matched_cse_title"],
-                            "raw_cse_title": matched_urls[url]["raw_cse_title"]
-                        }
-                    ))
-    logging.info(f"📰 최종 크롤링 및 캐싱 성공 문서 수: {len(docs)}")
-    return docs
 
 async def run_fact_check(youtube_url, faiss_partition_dirs):
     video_id = extract_video_id(youtube_url)
