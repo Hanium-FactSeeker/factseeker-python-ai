@@ -4,6 +4,7 @@ import logging
 import random 
 import time 
 from typing import List, Set
+import boto3
 
 from dotenv import load_dotenv
 
@@ -53,6 +54,60 @@ def _urls_from_partitions(parts: List[str]) -> List[str]:
     return urls
 
 
+def _expected_partitions_from_s3(prefix: str) -> Set[str]:
+    """S3에서 기대되는 파티션 디렉터리 이름 집합을 계산(.faiss 기준)."""
+    parts: Set[str] = set()
+    try:
+        s3 = boto3.client("s3")
+        bucket = os.environ.get("S3_BUCKET_NAME", "factseeker-faiss-db")
+        paginator = s3.get_paginator('list_objects_v2')
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get('Contents', []):
+                key = obj.get('Key')
+                if key and key.endswith('.faiss'):
+                    parts.add(os.path.basename(os.path.dirname(key)))
+    except Exception as e:
+        logging.warning(f"S3 파티션 조회 실패(건너뜀): {e}")
+    return parts
+
+
+async def _wait_until_preload_complete(prefix: str, timeout_sec: float = 900.0, poll_interval_sec: float = 3.0) -> None:
+    """
+    프리로드 완료를 보장하기 위해, S3에 존재하는 모든 파티션(partition_*)의
+    index.faiss/index.pkl이 로컬에 존재할 때까지 대기합니다.
+    """
+    expected = _expected_partitions_from_s3(prefix)
+    if not expected:
+        logging.info("S3에서 기대 파티션이 없어 대기 없이 진행합니다.")
+        return
+
+    logging.info(f"⏳ 프리로드 완료 대기 시작 (기대 파티션 {len(expected)}개)")
+    start = time.time()
+
+    def _has_all_locally() -> tuple[int, int]:
+        ok = 0
+        total = len(expected)
+        for part in expected:
+            local_dir = os.path.join(CHUNK_CACHE_DIR, part)
+            if os.path.isdir(local_dir):
+                faiss_ok = os.path.exists(os.path.join(local_dir, 'index.faiss'))
+                pkl_ok = os.path.exists(os.path.join(local_dir, 'index.pkl'))
+                if faiss_ok and pkl_ok:
+                    ok += 1
+        return ok, total
+
+    while True:
+        ok, total = _has_all_locally()
+        if ok >= total:
+            logging.info("✅ 프리로드된 파티션이 모두 확인되었습니다.")
+            return
+        if time.time() - start > timeout_sec:
+            logging.warning(f"⚠️ 프리로드 대기 시간 초과: {ok}/{total}개 확인됨. 계속 진행합니다.")
+            return
+        logging.info(f"... 대기 중: {ok}/{total}개 확인됨 (폴링 {poll_interval_sec:.0f}s)")
+        await asyncio.sleep(poll_interval_sec)
+
+
 async def _bounded_prewarm(urls: List[str], concurrency: int, min_delay: float, max_delay: float) -> None:
     sem = asyncio.Semaphore(concurrency)
 
@@ -76,10 +131,11 @@ async def _bounded_prewarm(urls: List[str], concurrency: int, min_delay: float, 
     await asyncio.gather(*tasks)
 
 
-async def main_async(prefix: str, source: str, url_file: str | None, limit: int, concurrency: int, partition_number: int | None, min_delay: float, max_delay: float):
+async def main_async(prefix: str, source: str, url_file: str | None, limit: int, concurrency: int, partition_number: int | None, min_delay: float, max_delay: float, preload_wait_timeout: float, preload_poll_interval: float):
     if source == "partitions":
         logging.info(f"🚀 제목 FAISS S3 프리로드 시작 (prefix={prefix})")
         preload_faiss_from_existing_s3(prefix)
+        await _wait_until_preload_complete(prefix, timeout_sec=preload_wait_timeout, poll_interval_sec=preload_poll_interval)
         parts = _find_partitions(target_partition=partition_number)
         logging.info(f"🔢 감지된 파티션 수: {len(parts)}")
         urls = _urls_from_partitions(parts)
@@ -115,6 +171,8 @@ def main():
     p.add_argument("--partition", type=int, default=None, help="처리할 특정 파티션 번호 (예: 1)")
     p.add_argument("--min-delay", type=float, default=1.0, help="각 URL 처리 전 최소 대기 시간 (초)")
     p.add_argument("--max-delay", type=float, default=5.0, help="각 URL 처리 전 최대 대기 시간 (초)")
+    p.add_argument("--preload-wait-timeout", type=float, default=900.0, help="프리로드 완료 대기 최대 시간(초)")
+    p.add_argument("--preload-poll-interval", type=float, default=3.0, help="프리로드 상태 폴링 주기(초)")
     args = p.parse_args()
 
     asyncio.run(main_async(
@@ -126,6 +184,8 @@ def main():
         partition_number=args.partition,
         min_delay=args.min_delay,
         max_delay=args.max_delay,
+        preload_wait_timeout=args.preload_wait_timeout,
+        preload_poll_interval=args.preload_poll_interval,
     ))
 
 
