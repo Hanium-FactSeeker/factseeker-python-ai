@@ -372,8 +372,23 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         }
 
     claim_tasks = [process_claim_step(idx, claim) for idx, claim in enumerate(claims_to_check)]
-    outputs = await asyncio.gather(*claim_tasks, return_exceptions=True)
-    outputs = [output for output in outputs if not isinstance(output, Exception)]
+    gathered = await asyncio.gather(*claim_tasks, return_exceptions=True)
+
+    # 예외가 발생해도 주장을 누락하지 않도록 에러 항목으로 기록
+    outputs = []
+    for i, result in enumerate(gathered):
+        if isinstance(result, Exception):
+            claim_text = claims_to_check[i] if i < len(claims_to_check) else ""
+            logging.error(f"🛑 주장 처리 중 예외 발생: '{claim_text}' -> {result}")
+            outputs.append({
+                "claim": claim_text,
+                "result": "error",
+                "confidence_score": 0,
+                "evidence": [],
+                "error": str(result)
+            })
+        else:
+            outputs.append(result)
 
     if outputs:
         avg_score = round(sum(o['confidence_score'] for o in outputs) / len(outputs))
