@@ -56,6 +56,7 @@ embed_model = OpenAIEmbeddings(
 # URL별 동시 처리를 막기 위한 잠금(Lock) 객체
 url_locks = {}
 
+
 # --- URL 기반 캐시 경로 및 S3 동기화 ---
 def url_to_cache_key(url):
     return hashlib.md5(url.encode()).hexdigest()
