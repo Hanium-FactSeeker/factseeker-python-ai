@@ -36,6 +36,10 @@ S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "factseeker-faiss-db")
 MAX_CLAIMS_TO_FACT_CHECK = 10
 MAX_ARTICLES_PER_CLAIM = 10  # ✨ 주장당 최대 검색 기사 수 (이 값을 조절하세요) ✨
 DISTANCE_THRESHOLD = 0.8
+
+# 동시 처리 제한 (병목 완화)
+MAX_CONCURRENT_CLAIMS = int(os.environ.get("MAX_CONCURRENT_CLAIMS", "3"))
+MAX_CONCURRENT_FACTCHECKS = int(os.environ.get("MAX_CONCURRENT_FACTCHECKS", "3"))
 # --- 설정값 끝 ---
 
 try:
@@ -309,6 +313,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         logging.exception(f"주장 추출/정제 중 오류: {e}")
         return {"error": f"Failed to extract claims: {e}"}
 
+    # 주장을 처리하는 단계를 정의하고, 주장 단위 동시성은 외부 세마포어로 제어합니다.
     async def process_claim_step(idx, claim):
         logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
         docs = await search_and_retrieve_docs(claim, faiss_partition_dirs)
@@ -352,7 +357,14 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 logging.error(f"    - LLM 팩트체크 체인 실행 중 오류: {e}")
             return None
 
-        factcheck_tasks = [factcheck_doc(doc) for doc in docs]
+        # per-claim 문서 팩트체크 동시성 제한
+        factcheck_semaphore = asyncio.Semaphore(MAX_CONCURRENT_FACTCHECKS)
+
+        async def limited_factcheck_doc(doc):
+            async with factcheck_semaphore:
+                return await factcheck_doc(doc)
+
+        factcheck_tasks = [limited_factcheck_doc(doc) for doc in docs]
         factcheck_results = await asyncio.gather(*factcheck_tasks)
         validated_evidence = [res for res in factcheck_results if res]
 
@@ -371,7 +383,14 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             "evidence": validated_evidence[:3]
         }
 
-    claim_tasks = [process_claim_step(idx, claim) for idx, claim in enumerate(claims_to_check)]
+    # 주장 단위 동시성 제한 (최대 3개 동시 처리)
+    claim_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLAIMS)
+
+    async def limited_process_claim(idx, claim):
+        async with claim_semaphore:
+            return await process_claim_step(idx, claim)
+
+    claim_tasks = [limited_process_claim(idx, claim) for idx, claim in enumerate(claims_to_check)]
     gathered = await asyncio.gather(*claim_tasks, return_exceptions=True)
 
     # 예외가 발생해도 주장을 누락하지 않도록 에러 항목으로 기록
