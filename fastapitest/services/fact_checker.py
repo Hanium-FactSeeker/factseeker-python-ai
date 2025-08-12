@@ -40,6 +40,7 @@ DISTANCE_THRESHOLD = 0.8
 # 동시 처리 제한 (병목 완화)
 MAX_CONCURRENT_CLAIMS = int(os.environ.get("MAX_CONCURRENT_CLAIMS", "3"))
 MAX_CONCURRENT_FACTCHECKS = int(os.environ.get("MAX_CONCURRENT_FACTCHECKS", "3"))
+MAX_EVIDENCES_PER_CLAIM = int(os.environ.get("MAX_EVIDENCES_PER_CLAIM", "10"))
 # --- 설정값 끝 ---
 
 try:
@@ -165,9 +166,17 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
 
     cse_title_embs = embed_model.embed_documents(cse_titles)
     search_vectors = np.array(cse_title_embs, dtype=np.float32)
-    matched_urls = {}
+    # CSE 결과 순서를 보존하기 위해 CSE 인덱스별 후보들을 수집
+    candidates_by_cse = {}
 
-    for faiss_dir in faiss_partition_dirs:
+    # 파티션 디렉터리의 숫자가 클수록 우선 (최신)
+    def partition_num(path: str) -> int:
+        import os, re
+        base = os.path.basename(path)
+        m = re.search(r'(\d+)', base)
+        return int(m.group(1)) if m else -1
+
+    for faiss_dir in sorted(faiss_partition_dirs, key=partition_num, reverse=True):
         try:
             title_faiss_db = FAISS.load_local(
                 faiss_dir, embeddings=embed_model, allow_dangerous_deserialization=True
@@ -183,15 +192,45 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
                         docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
                         doc = title_faiss_db.docstore._dict[docstore_id]
                         url = doc.metadata.get("url")
-                        if url and url not in seen_urls and url not in matched_urls:
-                            matched_urls[url] = {
+                        if url and url not in seen_urls:
+                            lst = candidates_by_cse.setdefault(j, [])
+                            lst.append({
+                                "url": url,
+                                "dist": float(dist),
+                                "cse_idx": j,
                                 "matched_cse_title": cse_titles[j],
                                 "raw_cse_title": cse_raw_titles[j]
-                            }
+                            })
         except Exception as e:
             logging.error(f"FAISS 검색 실패: {faiss_dir} → {e}")
 
-    article_urls = list(matched_urls.keys())
+    # CSE 검색 결과 순서를 그대로 따르되, 각 CSE 인덱스에서 가장 가까운 URL 하나만 선택
+    article_urls = []
+    matched_meta = {}
+    seen_tmp = set()
+    for j in range(len(cse_title_embs)):
+        lst = candidates_by_cse.get(j, [])
+        if not lst:
+            continue
+        # 같은 URL이 여러 파티션에서 발견될 수 있으니 URL별 최솟값만 유지하고, 이미 선택된 URL은 제외
+        best_per_url = {}
+        for cand in lst:
+            u = cand["url"]
+            if u in seen_tmp:
+                continue
+            prev = best_per_url.get(u)
+            if (prev is None) or (cand["dist"] < prev["dist"]):
+                best_per_url[u] = cand
+        if not best_per_url:
+            continue
+        chosen = min(best_per_url.values(), key=lambda c: c["dist"])
+        u = chosen["url"]
+        article_urls.append(u)
+        matched_meta[u] = {
+            "matched_cse_title": chosen["matched_cse_title"],
+            "raw_cse_title": chosen["raw_cse_title"]
+        }
+        seen_tmp.add(u)
     docs = []
 
     for url in article_urls:
@@ -200,12 +239,13 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
             for doc in faiss_db.docstore._dict.values():
                 actual_url = doc.metadata.get("url")
                 if actual_url and actual_url not in seen_urls:
+                    meta = matched_meta.get(actual_url, {"matched_cse_title": "", "raw_cse_title": ""})
                     docs.append(Document(
                         page_content=doc.page_content,
                         metadata={
                             "url": actual_url,
-                            "matched_cse_title": matched_urls[actual_url]["matched_cse_title"],
-                            "raw_cse_title": matched_urls[actual_url]["raw_cse_title"]
+                            "matched_cse_title": meta["matched_cse_title"],
+                            "raw_cse_title": meta["raw_cse_title"]
                         }
                     ))
                     break
@@ -316,15 +356,8 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
     # 주장을 처리하는 단계를 정의하고, 주장 단위 동시성은 외부 세마포어로 제어합니다.
     async def process_claim_step(idx, claim):
         logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
-        docs = await search_and_retrieve_docs(claim, faiss_partition_dirs)
-        if not docs:
-            logging.info(f"근거 문서를 찾지 못함: '{claim}'")
-            return {
-                "claim": claim, "result": "insufficient_evidence",
-                "confidence_score": 0, "evidence": []
-            }
 
-        url_set = set()
+        url_set = set()  # 같은 URL에서 중복 증거 방지
         validated_evidence = []
         fact_checker = build_factcheck_chain()
 
@@ -337,15 +370,12 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 justification = re.search(r"간단한 설명: (.+)", result_content)
                 snippet = re.search(r"핵심 근거 문장: (.+)", result_content)
                 url = doc.metadata.get("url")
-                
-                # --- ✨✨✨ 수정된 부분 ✨✨✨ ---
-                # "관련성: 예" 조건과 URL 중복 여부만 확인합니다.
+
                 if (
                     relevance and fact_check_result_match and justification
                     and "예" in relevance.group(1)
                     and url and url not in url_set
                 ):
-                # --- ✨✨✨ 수정 끝 ---
                     url_set.add(url)
                     return {
                         "url": url, "relevance": "yes",
@@ -364,17 +394,45 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             async with factcheck_semaphore:
                 return await factcheck_doc(doc)
 
-        factcheck_tasks = [limited_factcheck_doc(doc) for doc in docs]
-        factcheck_results = await asyncio.gather(*factcheck_tasks)
-        validated_evidence = [res for res in factcheck_results if res]
+        # 증거 10개에 도달하면 즉시 중단하는 증분 처리 루프
+        seen_urls_local = set()
+        attempt_count = 0
 
+        while len(validated_evidence) < MAX_EVIDENCES_PER_CLAIM:
+            attempt_count += 1
+            new_docs = await search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls_local)
+
+            if not new_docs:
+                if attempt_count > 1:
+                    logging.info("더 이상 수집할 문서가 없습니다.")
+                break
+
+            # 이번 배치에서 얻은 URL은 다음 라운드에 중복 수집되지 않도록 마킹
+            for d in new_docs:
+                if d.metadata.get("url"):
+                    seen_urls_local.add(d.metadata.get("url"))
+
+            factcheck_tasks = [limited_factcheck_doc(doc) for doc in new_docs]
+            factcheck_results = await asyncio.gather(*factcheck_tasks)
+            for res in factcheck_results:
+                if res:
+                    validated_evidence.append(res)
+                    if len(validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
+                        break
+
+            # 안전장치: 너무 많은 라운드 방지
+            if attempt_count > 30:
+                logging.warning("증거 수집 반복 한도를 초과했습니다. 중단합니다.")
+                break
+
+        # 최종 결과 계산
         diversity_score = calculate_source_diversity_score(validated_evidence)
         confidence_score = calculate_fact_check_confidence({
             "source_diversity": diversity_score,
             "evidence_count": min(len(validated_evidence), 5)
         })
 
-        logging.info(f"--- 팩트체크 완료: '{claim}' -> 신뢰도: {confidence_score}%")
+        logging.info(f"--- 팩트체크 완료: '{claim}' -> 신뢰도: {confidence_score}% (증거 {len(validated_evidence)}개)")
 
         return {
             "claim": claim,

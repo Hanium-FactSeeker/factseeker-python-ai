@@ -37,10 +37,23 @@ async def lifespan(app: FastAPI):
     # 로컬 캐시 폴더에서 로드된 파티션 디렉토리 목록을 전역 변수에 저장합니다.
     if os.path.exists(CHUNK_CACHE_DIR):
         faiss_partition_dirs.clear()
-        for item in os.listdir(CHUNK_CACHE_DIR):
-            item_path = os.path.join(CHUNK_CACHE_DIR, item)
-            if os.path.isdir(item_path) and item.startswith("partition_"):
-                faiss_partition_dirs.append(item_path)
+        # 파티션명에 포함된 숫자가 클수록 최신으로 간주하여 내림차순 정렬
+        def partition_num(name: str) -> int:
+            try:
+                base = os.path.basename(name)
+                # 예: partition_12 -> 12
+                num = int(''.join(ch for ch in base if ch.isdigit()))
+                return num
+            except Exception:
+                return -1
+
+        items = [
+            os.path.join(CHUNK_CACHE_DIR, item)
+            for item in os.listdir(CHUNK_CACHE_DIR)
+            if os.path.isdir(os.path.join(CHUNK_CACHE_DIR, item)) and item.startswith("partition_")
+        ]
+        for item_path in sorted(items, key=partition_num, reverse=True):
+            faiss_partition_dirs.append(item_path)
     
     if faiss_partition_dirs:
         logging.info(f"✅ {len(faiss_partition_dirs)}개의 제목 FAISS 파티션을 성공적으로 로드했습니다.")
