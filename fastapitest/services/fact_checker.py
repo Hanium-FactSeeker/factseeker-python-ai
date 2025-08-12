@@ -156,9 +156,10 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
         summarized_query = claim
 
     search_results = await search_news_google_cs(summarized_query)
-    cse_titles = [clean_news_title(item.get('title', '')) for item in search_results[:20]]
-    cse_raw_titles = [item.get('title', '') for item in search_results[:20]]
-    cse_urls = [item.get('link') for item in search_results[:20]]
+    # CSE 상위 10개만 사용
+    cse_titles = [clean_news_title(item.get('title', '')) for item in search_results[:10]]
+    cse_raw_titles = [item.get('title', '') for item in search_results[:10]]
+    cse_urls = [item.get('link') for item in search_results[:10]]
 
     if not cse_titles:
         logging.warning("Google 검색 결과에서 제목을 찾을 수 없어 탐색을 종료합니다.")
@@ -394,36 +395,27 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             async with factcheck_semaphore:
                 return await factcheck_doc(doc)
 
-        # 증거 10개에 도달하면 즉시 중단하는 증분 처리 루프
-        seen_urls_local = set()
-        attempt_count = 0
+        # CSE 검색은 한 번만 수행하고, 해당 결과에서 매칭된 문서만 배치로 팩트체크
+        new_docs = await search_and_retrieve_docs_once(claim, faiss_partition_dirs, set())
+        if not new_docs:
+            logging.info(f"근거 문서를 찾지 못함: '{claim}'")
+            return {
+                "claim": claim, "result": "insufficient_evidence",
+                "confidence_score": 0, "evidence": []
+            }
 
-        while len(validated_evidence) < MAX_EVIDENCES_PER_CLAIM:
-            attempt_count += 1
-            new_docs = await search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls_local)
-
-            if not new_docs:
-                if attempt_count > 1:
-                    logging.info("더 이상 수집할 문서가 없습니다.")
+        # 배치 처리로 조기 종료 가능하게 함
+        for i in range(0, len(new_docs), MAX_CONCURRENT_FACTCHECKS):
+            if len(validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
                 break
-
-            # 이번 배치에서 얻은 URL은 다음 라운드에 중복 수집되지 않도록 마킹
-            for d in new_docs:
-                if d.metadata.get("url"):
-                    seen_urls_local.add(d.metadata.get("url"))
-
-            factcheck_tasks = [limited_factcheck_doc(doc) for doc in new_docs]
+            batch = new_docs[i:i+MAX_CONCURRENT_FACTCHECKS]
+            factcheck_tasks = [limited_factcheck_doc(doc) for doc in batch]
             factcheck_results = await asyncio.gather(*factcheck_tasks)
             for res in factcheck_results:
                 if res:
                     validated_evidence.append(res)
                     if len(validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
                         break
-
-            # 안전장치: 너무 많은 라운드 방지
-            if attempt_count > 30:
-                logging.warning("증거 수집 반복 한도를 초과했습니다. 중단합니다.")
-                break
 
         # 최종 결과 계산
         diversity_score = calculate_source_diversity_score(validated_evidence)
