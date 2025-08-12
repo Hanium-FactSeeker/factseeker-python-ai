@@ -19,7 +19,7 @@ from core.lambdas import (
     get_article_text,
     clean_news_title,
     calculate_fact_check_confidence,
-    calculate_source_diversity_score
+    calculate_source_diversity_score,
 )
 from core.llm_chains import (
     build_claim_extractor,
@@ -27,19 +27,18 @@ from core.llm_chains import (
     build_factcheck_chain,
     build_reduce_similar_claims_chain,
     build_channel_type_classifier,
-    get_chat_llm
 )
 from core.faiss_manager import CHUNK_CACHE_DIR
 
 # --- 설정값 ---
 S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME", "factseeker-faiss-db")
 MAX_CLAIMS_TO_FACT_CHECK = 10
-MAX_ARTICLES_PER_CLAIM = 10  # ✨ 주장당 최대 검색 기사 수 (이 값을 조절하세요) ✨
+MAX_ARTICLES_PER_CLAIM = 10  # 주장당 최대 확보 기사 수
 DISTANCE_THRESHOLD = 0.8
 # --- 설정값 끝 ---
 
 try:
-    s3 = boto3.client('s3')
+    s3 = boto3.client("s3")
 except Exception as e:
     s3 = None
     logging.error(f"S3 클라이언트 초기화 실패: {e}")
@@ -49,16 +48,19 @@ embed_model = OpenAIEmbeddings(
 )
 
 # URL별 동시 처리를 막기 위한 잠금(Lock) 객체
-url_locks = {}
+url_locks: dict[str, asyncio.Lock] = {}
+
 
 # --- URL 기반 캐시 경로 및 S3 동기화 ---
-def url_to_cache_key(url):
+def url_to_cache_key(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
-def get_article_faiss_path(url):
+
+def get_article_faiss_path(url: str) -> str:
     return os.path.join(CHUNK_CACHE_DIR, url_to_cache_key(url))
 
-def upload_to_s3(local_dir, s3_key):
+
+def upload_to_s3(local_dir: str, s3_key: str) -> None:
     if not s3:
         logging.warning("S3 클라이언트가 없어 업로드를 건너뜁니다.")
         return
@@ -69,34 +71,43 @@ def upload_to_s3(local_dir, s3_key):
             try:
                 s3.upload_file(local_path, S3_BUCKET_NAME, s3_path)
             except ClientError as e:
-                logging.error(f"S3 업로드 실패: {local_path} -> s3://{S3_BUCKET_NAME}/{s3_path} - {e}")
+                logging.error(
+                    f"S3 업로드 실패: {local_path} -> s3://{S3_BUCKET_NAME}/{s3_path} - {e}"
+                )
                 raise
 
-def download_from_s3(local_dir, s3_key):
+
+def download_from_s3(local_dir: str, s3_key: str) -> bool:
     if not s3:
         logging.warning("S3 클라이언트가 없어 다운로드를 건너뜁니다.")
         return False
     try:
         response = s3.list_objects_v2(Bucket=S3_BUCKET_NAME, Prefix=s3_key)
-        if 'Contents' not in response:
+        if "Contents" not in response:
             return False
         os.makedirs(local_dir, exist_ok=True)
-        for obj in response['Contents']:
-            s3_path = obj['Key']
+        for obj in response["Contents"]:
+            s3_path = obj["Key"]
             relative_path = os.path.relpath(s3_path, s3_key)
             local_path = os.path.join(local_dir, relative_path)
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
             s3.download_file(S3_BUCKET_NAME, s3_path, local_path)
         return True
     except ClientError as e:
-        if e.response['Error']['Code'] == '404':
+        if e.response["Error"]["Code"] == "404":
             return False
-        logging.error(f"S3 다운로드 중 오류 발생: s3://{S3_BUCKET_NAME}/{s3_key} - {e}")
+        logging.error(
+            f"S3 다운로드 중 오류 발생: s3://{S3_BUCKET_NAME}/{s3_key} - {e}"
+        )
         return False
 
+
 # --- 기사 URL 기준 FAISS 생성/로드 (잠금 로직 적용) ---
-async def ensure_article_faiss(url):
-    """(잠금 기능 추가) 기사 본문을 벡터화하고 캐시(S3/로컬)에 저장/로드"""
+async def ensure_article_faiss(url: str):
+    """
+    (잠금 기능 추가) 기사 본문을 벡터화하고 캐시(S3/로컬)에 저장/로드
+    - core.lambdas.get_article_text 안에서 상대경로를 절대경로로 보정합니다.
+    """
     lock = url_locks.setdefault(url, asyncio.Lock())
     async with lock:
         cache_key = url_to_cache_key(url)
@@ -108,39 +119,44 @@ async def ensure_article_faiss(url):
         if os.path.exists(faiss_path) and os.path.exists(pkl_path):
             try:
                 logging.info(f"캐시 재사용 (잠금 후 확인): {url}")
-                return FAISS.load_local(local_path, embed_model, allow_dangerous_deserialization=True)
+                return FAISS.load_local(
+                    local_path, embed_model, allow_dangerous_deserialization=True
+                )
             except Exception as e:
                 shutil.rmtree(local_path, ignore_errors=True)
                 logging.warning(f"로컬 캐시 손상, 재생성 시도: {e}")
-        
+
         if s3 is not None and download_from_s3(local_path, s3_key):
             try:
                 logging.info(f"S3 캐시 재사용 (잠금 후 확인): {url}")
-                return FAISS.load_local(local_path, embed_model, allow_dangerous_deserialization=True)
+                return FAISS.load_local(
+                    local_path, embed_model, allow_dangerous_deserialization=True
+                )
             except Exception as e:
                 shutil.rmtree(local_path, ignore_errors=True)
                 logging.warning(f"S3 캐시 손상, 재생성 시도: {e}")
-        
+
         logging.info(f"캐시 없음, 신규 크롤링 시작: {url}")
         text = await get_article_text(url)
         if not text or len(text) < 200:
             return None
-            
+
         doc = Document(page_content=text, metadata={"url": url})
         faiss_db = FAISS.from_documents([doc], embed_model)
         faiss_db.save_local(local_path)
-        
+
         if s3 is not None:
             try:
                 upload_to_s3(local_path, s3_key)
                 logging.info(f"✅ S3 업로드 성공: {s3_key}")
             except Exception as e:
                 logging.warning(f"S3 업로드 실패: {e}")
-                
+
         return faiss_db
 
+
 # --- CSE → FAISS에서 여러 기사, url 기준 중복 없는 문서만 수집 (한도 즉시 중단) ---
-async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
+async def search_and_retrieve_docs_once(claim: str, faiss_partition_dirs, seen_urls):
     summarizer = build_claim_summarizer()
     try:
         summary_result = await summarizer.ainvoke({"claim": claim})
@@ -151,9 +167,9 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
         summarized_query = claim
 
     search_results = await search_news_google_cs(summarized_query)
-    cse_titles = [clean_news_title(item.get('title', '')) for item in search_results[:20]]
-    cse_raw_titles = [item.get('title', '') for item in search_results[:20]]
-    cse_urls = [item.get('link') for item in search_results[:20]]
+    cse_titles = [clean_news_title(item.get("title", "")) for item in search_results[:20]]
+    cse_raw_titles = [item.get("title", "") for item in search_results[:20]]
+    # cse_urls = [item.get("link") for item in search_results[:20]]  # 필요 시 사용
 
     if not cse_titles:
         logging.warning("Google 검색 결과에서 제목을 찾을 수 없어 탐색을 종료합니다.")
@@ -161,7 +177,7 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
 
     cse_title_embs = embed_model.embed_documents(cse_titles)
     search_vectors = np.array(cse_title_embs, dtype=np.float32)
-    matched_urls = {}
+    matched_urls: dict[str, dict] = {}
 
     for faiss_dir in faiss_partition_dirs:
         try:
@@ -182,13 +198,13 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
                         if url and url not in seen_urls and url not in matched_urls:
                             matched_urls[url] = {
                                 "matched_cse_title": cse_titles[j],
-                                "raw_cse_title": cse_raw_titles[j]
+                                "raw_cse_title": cse_raw_titles[j],
                             }
         except Exception as e:
             logging.error(f"FAISS 검색 실패: {faiss_dir} → {e}")
 
     article_urls = list(matched_urls.keys())
-    docs = []
+    docs: list[Document] = []
 
     for url in article_urls:
         faiss_db = await ensure_article_faiss(url)
@@ -196,68 +212,63 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
             for doc in faiss_db.docstore._dict.values():
                 actual_url = doc.metadata.get("url")
                 if actual_url and actual_url not in seen_urls:
-                    docs.append(Document(
-                        page_content=doc.page_content,
-                        metadata={
-                            "url": actual_url,
-                            "matched_cse_title": matched_urls[actual_url]["matched_cse_title"],
-                            "raw_cse_title": matched_urls[actual_url]["raw_cse_title"]
-                        }
-                    ))
+                    docs.append(
+                        Document(
+                            page_content=doc.page_content,
+                            metadata={
+                                "url": actual_url,
+                                "matched_cse_title": matched_urls[actual_url][
+                                    "matched_cse_title"
+                                ],
+                                "raw_cse_title": matched_urls[actual_url][
+                                    "raw_cse_title"
+                                ],
+                            },
+                        )
+                    )
                     break
     return docs
 
-# --- 본문 확보된 뉴스 15개가 될 때까지 반복 확보 ---
-async def search_and_retrieve_docs(claim, faiss_partition_dirs):
-    collected_docs = []
-    seen_urls = set()
+
+# --- 본문 확보된 뉴스가 한도에 도달할 때까지 반복 확보 ---
+async def search_and_retrieve_docs(claim: str, faiss_partition_dirs):
+    collected_docs: list[Document] = []
+    seen_urls: set[str] = set()
     attempt_count = 0
 
     while len(collected_docs) < MAX_ARTICLES_PER_CLAIM:
         attempt_count += 1
-        logging.info(f"🔁 뉴스 수집 시도 {attempt_count}회 - 확보된 기사 수: {len(collected_docs)}")
+        logging.info(
+            f"🔁 뉴스 수집 시도 {attempt_count}회 - 확보된 기사 수: {len(collected_docs)}"
+        )
 
-        new_docs = await search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls)
+        new_docs = await search_and_retrieve_docs_once(
+            claim, faiss_partition_dirs, seen_urls
+        )
 
         if not new_docs:
-            logging.warning(f"📭 수집된 문서 없음. 반복 진행 중... (현재 확보: {len(collected_docs)})")
+            logging.warning(
+                f"📭 수집된 문서 없음. 반복 진행 중... (현재 확보: {len(collected_docs)})"
+            )
 
         for doc in new_docs:
             url = doc.metadata.get("url")
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 collected_docs.append(doc)
-                logging.info(f"✅ 기사 확보: {url} ({len(collected_docs)}/{MAX_ARTICLES_PER_CLAIM})")
+                logging.info(
+                    f"✅ 기사 확보: {url} ({len(collected_docs)}/{MAX_ARTICLES_PER_CLAIM})"
+                )
 
         if attempt_count > 30 and len(collected_docs) < MAX_ARTICLES_PER_CLAIM:
-            logging.error("🚨 30회 이상 반복했지만 15개 확보 실패. 중단합니다.")
+            logging.error("🚨 30회 이상 반복했지만 목표 개수 확보 실패. 중단합니다.")
             break
 
     logging.info(f"📰 최종 확보된 문서 수: {len(collected_docs)}개")
     return collected_docs[:MAX_ARTICLES_PER_CLAIM]
 
-    article_urls = list(matched_urls.keys())
-    coros = [ensure_article_faiss(url) for url in article_urls]
-    faiss_dbs = await asyncio.gather(*coros)
-    docs = []
-    for faiss_db in faiss_dbs:
-        if faiss_db:
-            doc_list = [doc for doc in faiss_db.docstore._dict.values()]
-            for doc in doc_list:
-                url = doc.metadata.get("url")
-                if url and url in matched_urls:
-                    docs.append(Document(
-                        page_content=doc.page_content,
-                        metadata={
-                            "url": url,
-                            "matched_cse_title": matched_urls[url]["matched_cse_title"],
-                            "raw_cse_title": matched_urls[url]["raw_cse_title"]
-                        }
-                    ))
-    logging.info(f"📰 최종 크롤링 및 캐싱 성공 문서 수: {len(docs)}")
-    return docs
 
-async def run_fact_check(youtube_url, faiss_partition_dirs):
+async def run_fact_check(youtube_url: str, faiss_partition_dirs):
     video_id = extract_video_id(youtube_url)
     if not video_id:
         return {"error": "Invalid YouTube URL"}
@@ -270,83 +281,108 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
         extractor = build_claim_extractor()
         result = await extractor.ainvoke({"transcript": transcript})
-        claims = [line.strip() for line in result.content.strip().split('\n') if line.strip()]
+        claims = [
+            line.strip() for line in result.content.strip().split("\n") if line.strip()
+        ]
 
         if not claims:
             return {
-                "video_id": video_id, "video_url": youtube_url,
-                "video_total_confidence_score": 0, "claims": []
+                "video_id": video_id,
+                "video_url": youtube_url,
+                "video_total_confidence_score": 0,
+                "claims": [],
             }
 
         reducer = build_reduce_similar_claims_chain()
         claims_json = json.dumps(claims, ensure_ascii=False, indent=2)
         reduced_result = await reducer.ainvoke({"claims_json": claims_json})
 
-        claims_to_check = []
+        claims_to_check: list[str] = []
         try:
-            json_match = re.search(r"```json\s*(\[.*?\])\s*```", reduced_result.content, re.DOTALL)
+            json_match = re.search(
+                r"```json\s*(\[.*?\])\s*```", reduced_result.content, re.DOTALL
+            )
             if json_match:
                 json_content = json_match.group(1)
                 claims_to_check = json.loads(json_content)
             else:
-                claims_to_check = [line.strip() for line in reduced_result.content.strip().split('\n') if line.strip()]
+                claims_to_check = [
+                    line.strip()
+                    for line in reduced_result.content.strip().split("\n")
+                    if line.strip()
+                ]
         except json.JSONDecodeError:
             claims_to_check = [
-                line.strip() for line in reduced_result.content.strip().split('\n')
-                if line.strip() and not line.strip().startswith(('```json', '```', '[', ']'))
+                line.strip()
+                for line in reduced_result.content.strip().split("\n")
+                if line.strip()
+                and not line.strip().startswith(("```json", "```", "[", "]"))
             ]
 
         claims_to_check = claims_to_check[:MAX_CLAIMS_TO_FACT_CHECK]
-        logging.info(f"✂️ 중복 제거 후 최종 팩트체크 대상 주장 {len(claims_to_check)}개: {claims_to_check}")
+        logging.info(
+            f"✂️ 중복 제거 후 최종 팩트체크 대상 주장 {len(claims_to_check)}개: {claims_to_check}"
+        )
 
         if not claims_to_check:
             return {
-                "video_id": video_id, "video_url": youtube_url,
-                "video_total_confidence_score": 0, "claims": []
+                "video_id": video_id,
+                "video_url": youtube_url,
+                "video_total_confidence_score": 0,
+                "claims": [],
             }
 
     except Exception as e:
         logging.exception(f"주장 추출/정제 중 오류: {e}")
         return {"error": f"Failed to extract claims: {e}"}
 
-    async def process_claim_step(idx, claim):
+    async def process_claim_step(idx: int, claim: str):
         logging.info(f"--- 팩트체크 시작: ({idx + 1}/{len(claims_to_check)}) '{claim}'")
         docs = await search_and_retrieve_docs(claim, faiss_partition_dirs)
         if not docs:
             logging.info(f"근거 문서를 찾지 못함: '{claim}'")
             return {
-                "claim": claim, "result": "insufficient_evidence",
-                "confidence_score": 0, "evidence": []
+                "claim": claim,
+                "result": "insufficient_evidence",
+                "confidence_score": 0,
+                "evidence": [],
             }
 
-        url_set = set()
-        validated_evidence = []
+        url_set: set[str] = set()
         fact_checker = build_factcheck_chain()
 
-        async def factcheck_doc(doc):
+        async def factcheck_doc(doc: Document):
             try:
-                check_result = await fact_checker.ainvoke({"claim": claim, "context": doc.page_content})
+                check_result = await fact_checker.ainvoke(
+                    {"claim": claim, "context": doc.page_content}
+                )
                 result_content = check_result.content
-                relevance = re.search(r"관련성: (.+)", result_content)
-                fact_check_result_match = re.search(r"사실 설명 여부: (.+)", result_content)
-                justification = re.search(r"간단한 설명: (.+)", result_content)
-                snippet = re.search(r"핵심 근거 문장: (.+)", result_content)
+
+                # 체인 출력 파싱
+                relevance = re.search(r"관련성:\s*(.+)", result_content)
+                fact_check_result_match = re.search(r"사실 설명 여부:\s*(.+)", result_content)
+                justification = re.search(r"간단한 설명:\s*(.+)", result_content)
+                snippet = re.search(r"핵심 근거 문장:\s*(.+)", result_content)
                 url = doc.metadata.get("url")
-                
-                # --- ✨✨✨ 수정된 부분 ✨✨✨ ---
-                # "관련성: 예" 조건과 URL 중복 여부만 확인합니다.
+
+                # ✅ 최소 기준: 관련성 "예" + URL 중복 방지
                 if (
-                    relevance and fact_check_result_match and justification
+                    relevance
                     and "예" in relevance.group(1)
-                    and url and url not in url_set
+                    and url
+                    and url not in url_set
                 ):
-                # --- ✨✨✨ 수정 끝 ---
                     url_set.add(url)
                     return {
-                        "url": url, "relevance": "yes",
-                        "fact_check_result": fact_check_result_match.group(1).strip(),
-                        "justification": justification.group(1).strip(),
-                        "snippet": snippet.group(1).strip() if snippet else ""
+                        "url": url,
+                        "relevance": "yes",
+                        "fact_check_result": fact_check_result_match.group(1).strip()
+                        if fact_check_result_match
+                        else "",
+                        "justification": justification.group(1).strip()
+                        if justification
+                        else "",
+                        "snippet": snippet.group(1).strip() if snippet else "",
                     }
             except Exception as e:
                 logging.error(f"    - LLM 팩트체크 체인 실행 중 오류: {e}")
@@ -356,11 +392,11 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         factcheck_results = await asyncio.gather(*factcheck_tasks)
         validated_evidence = [res for res in factcheck_results if res]
 
+        # 신뢰도 계산: 출처 다양성(0~5) + 근거 수(최대 5) → 0~100 변환
         diversity_score = calculate_source_diversity_score(validated_evidence)
-        confidence_score = calculate_fact_check_confidence({
-            "source_diversity": diversity_score,
-            "evidence_count": min(len(validated_evidence), 5)
-        })
+        confidence_score = calculate_fact_check_confidence(
+            {"source_diversity": diversity_score, "evidence_count": min(len(validated_evidence), 5)}
+        )
 
         logging.info(f"--- 팩트체크 완료: '{claim}' -> 신뢰도: {confidence_score}%")
 
@@ -368,21 +404,28 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             "claim": claim,
             "result": "likely_true" if validated_evidence else "insufficient_evidence",
             "confidence_score": confidence_score,
-            "evidence": validated_evidence[:3]
+            "evidence": validated_evidence[:3],  # 최대 3개만 노출
         }
 
     claim_tasks = [process_claim_step(idx, claim) for idx, claim in enumerate(claims_to_check)]
-    outputs = await asyncio.gather(*claim_tasks, return_exceptions=True)
-    outputs = [output for output in outputs if not isinstance(output, Exception)]
+    outputs_raw = await asyncio.gather(*claim_tasks, return_exceptions=True)
+    outputs = [o for o in outputs_raw if not isinstance(o, Exception)]
 
+    # ✅ 증거가 없어도 각 주장은 결과에 남습니다 (insufficient_evidence)
     if outputs:
-        avg_score = round(sum(o['confidence_score'] for o in outputs) / len(outputs))
-        evidence_ratio = sum(1 for o in outputs if o["result"] == "likely_true") / len(outputs)
-        summary = f"증거 확보된 주장 비율: {evidence_ratio*100:.1f}%" if len(outputs) >= 3 else f"신뢰도 평가 불가 (팩트체크 주장 수 부족: {len(outputs)}개)"
+        avg_score = round(sum(o["confidence_score"] for o in outputs) / len(outputs))
+        evidence_ratio = (
+            sum(1 for o in outputs if o["result"] == "likely_true") / len(outputs)
+        )
+        summary = (
+            f"증거 확보된 주장 비율: {evidence_ratio*100:.1f}%"
+            if len(outputs) >= 3
+            else f"신뢰도 평가 불가 (팩트체크 주장 수 부족: {len(outputs)}개)"
+        )
     else:
         avg_score = 0
         summary = "결과 없음"
-    
+
     classifier = build_channel_type_classifier()
     classification = await classifier.ainvoke({"transcript": transcript})
     channel_type, reason = parse_channel_type(classification.content)
@@ -394,12 +437,19 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         "claims": outputs,
         "summary": summary,
         "channel_type": channel_type,
-        "channel_type_reason": reason
+        "channel_type_reason": reason,
     }
+
 
 def parse_channel_type(llm_output: str):
     channel_type_match = re.search(r"채널 유형:\s*(.+)", llm_output)
     reason_match = re.search(r"분류 근거:\s*(.+)", llm_output)
-    channel_type = channel_type_match.group(1).strip() if channel_type_match else "알 수 없음"
-    reason = reason_match.group(1).strip() if reason_match else "LLM 응답에서 판단 근거를 찾을 수 없습니다."
+    channel_type = (
+        channel_type_match.group(1).strip() if channel_type_match else "알 수 없음"
+    )
+    reason = (
+        reason_match.group(1).strip()
+        if reason_match
+        else "LLM 응답에서 판단 근거를 찾을 수 없습니다."
+    )
     return channel_type, reason
