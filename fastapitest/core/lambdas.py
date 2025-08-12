@@ -120,51 +120,56 @@ async def search_news_google_cs(query: str):
         return p
 
     url = "https://www.googleapis.com/customsearch/v1"
+
+    async def _cse_fetch(session: aiohttp.ClientSession, params: dict, max_retries: int = 2):
+        delay = 0.5
+        for attempt in range(max_retries + 1):
+            try:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                    data = await resp.json()
+                    if "error" in data:
+                        msg = data["error"].get("message")
+                        logging.error(f"Google CSE API 오류: {msg}")
+                        if msg and "quota" in msg.lower():
+                            logging.warning("경고: CSE 쿼터 초과 가능성")
+                        return []
+                    return data.get("items") or []
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                logging.warning(f"CSE 요청 실패(재시도 {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                else:
+                    return []
+
     async with aiohttp.ClientSession(headers={"Accept": "application/json"}) as session:
-        # 1차: 원 쿼리
+        # 1차: 원 쿼리 (+2페이지까지)
         for attempt in range(1, 3):
             params = _mk_params(query, start=1 + (attempt - 1) * 10 if attempt > 1 else None)
-            async with session.get(url, params=params, timeout=15) as resp:
-                try:
-                    data = await resp.json()
-                except Exception:
-                    txt = await resp.text()
-                    logging.error(f"CSE JSON 파싱 실패(status={resp.status}): {txt[:200]}")
-                    return []
-                if "error" in data:
-                    msg = data["error"].get("message")
-                    logging.error(f"Google CSE API 오류: {msg}")
-                    if msg and "quota" in msg.lower():
-                        logging.warning("경고: CSE 쿼터 초과 가능성")
-                    return []
-                items = data.get("items") or []
-                if items:
-                    for it in items[:5]:
-                        logging.debug(f"[CSE] raw_title={it.get('title')!r}")
-                    return items
+            items = await _cse_fetch(session, params)
+            if items:
+                for it in items[:5]:
+                    logging.debug(f"[CSE] raw_title={it.get('title')!r}")
+                return items
 
         # 2차: 방송3사 OR 확장
         if re.search(r"\b(KBS|MBC|EBS)\b", query, flags=re.IGNORECASE):
             params = _mk_params(_simplify_ko(query), or_terms="KBS MBC EBS")
-            async with session.get(url, params=params, timeout=15) as resp:
-                data = await resp.json()
-                items = data.get("items") or []
-                if items:
-                    for it in items[:5]:
-                        logging.debug(f"[CSE] raw_title={it.get('title')!r}")
-                    return items
+            items = await _cse_fetch(session, params)
+            if items:
+                for it in items[:5]:
+                    logging.debug(f"[CSE] raw_title={it.get('title')!r}")
+                return items
 
         # 3차: 강제 축약
         simplified = _simplify_ko(query)
         if simplified != query:
             params = _mk_params(simplified)
-            async with session.get(url, params=params, timeout=15) as resp:
-                data = await resp.json()
-                items = data.get("items") or []
-                if items:
-                    for it in items[:5]:
-                        logging.debug(f"[CSE] raw_title={it.get('title')!r}")
-                    return items
+            items = await _cse_fetch(session, params)
+            if items:
+                for it in items[:5]:
+                    logging.debug(f"[CSE] raw_title={it.get('title')!r}")
+                return items
 
     logging.warning("📭 CSE 결과 0건 (모든 다운시프트 실패)")
     return []

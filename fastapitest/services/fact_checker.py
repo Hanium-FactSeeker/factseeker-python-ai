@@ -165,7 +165,22 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
         logging.warning("Google 검색 결과에서 제목을 찾을 수 없어 탐색을 종료합니다.")
         return []
 
-    cse_title_embs = embed_model.embed_documents(cse_titles)
+    # 임베딩 호출 안정화: 소규모 재시도/예외 보호
+    def _embed_docs_with_retry(texts, retries=1):
+        delay = 0.5
+        for attempt in range(retries + 1):
+            try:
+                return embed_model.embed_documents(texts)
+            except Exception as e:
+                logging.warning(f"임베딩 실패(재시도 {attempt}/{retries}): {e}")
+                if attempt < retries:
+                    import time as _t
+                    _t.sleep(delay)
+                    delay *= 2
+                else:
+                    return []
+
+    cse_title_embs = _embed_docs_with_retry(cse_titles, retries=1)
     search_vectors = np.array(cse_title_embs, dtype=np.float32)
     # CSE 결과 순서를 보존하기 위해 CSE 인덱스별 후보들을 수집
     candidates_by_cse = {}
@@ -237,7 +252,25 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
     if not article_urls:
         try:
             logging.info("CSE 기반 매칭 결과 없음 → 키워드 직접 FAISS 검색 시도")
-            query_vec = embed_model.embed_query(summarized_query)
+            # 임베딩 쿼리도 재시도/예외 보호
+            def _embed_query_with_retry(q, retries=1):
+                delay = 0.5
+                for attempt in range(retries + 1):
+                    try:
+                        return embed_model.embed_query(q)
+                    except Exception as e:
+                        logging.warning(f"임베딩 쿼리 실패(재시도 {attempt}/{retries}): {e}")
+                        if attempt < retries:
+                            import time as _t
+                            _t.sleep(delay)
+                            delay *= 2
+                        else:
+                            return None
+
+            emb = _embed_query_with_retry(summarized_query, retries=1)
+            if emb is None:
+                return []
+            query_vec = emb
             query_np = np.array([query_vec], dtype=np.float32)
             fallback = {}
 
