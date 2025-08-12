@@ -1,17 +1,37 @@
 import os
+import sys
 import asyncio
 import logging
 import random 
 import time 
 from typing import List, Set
+from pathlib import Path
 import boto3
 
 from dotenv import load_dotenv
 
-# Reuse existing app components without modifying them
-from fastapitest.services.fact_checker import ensure_article_faiss, embed_model
-from fastapitest.core.preload_s3_faiss import preload_faiss_from_existing_s3, CHUNK_CACHE_DIR
 from langchain_community.vectorstores import FAISS
+
+
+def _resolve_imports():
+    """환경에 따라 동적으로 모듈을 불러옵니다.
+    - 우선 fastapitest 패키지 경로로 시도
+    - 실패 시 fastapitest 디렉토리를 sys.path에 추가하고 패키지 내부 상대 경로로 시도
+    """
+    try:
+        from fastapitest.services.fact_checker import ensure_article_faiss as _ensure, embed_model as _embed
+        from fastapitest.core.preload_s3_faiss import preload_faiss_from_existing_s3 as _preload, CHUNK_CACHE_DIR as _cache
+        return _ensure, _embed, _preload, _cache
+    except ModuleNotFoundError:
+        pkg_dir = Path(__file__).resolve().parents[1]  # fastapitest 디렉토리
+        if str(pkg_dir) not in sys.path:
+            sys.path.insert(0, str(pkg_dir))
+        from services.fact_checker import ensure_article_faiss as _ensure, embed_model as _embed
+        from core.preload_s3_faiss import preload_faiss_from_existing_s3 as _preload, CHUNK_CACHE_DIR as _cache
+        return _ensure, _embed, _preload, _cache
+
+
+ensure_article_faiss, embed_model, preload_faiss_from_existing_s3, CHUNK_CACHE_DIR = _resolve_imports()
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
