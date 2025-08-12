@@ -184,8 +184,11 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
 
     cse_title_embs = _embed_docs_with_retry(cse_titles, retries=1)
     search_vectors = np.array(cse_title_embs, dtype=np.float32)
-    # CSE 결과 순서를 보존하기 위해 CSE 인덱스별 후보들을 수집
-    candidates_by_cse = {}
+    # 선착 글로벌 조기중단을 위해 즉시 누적
+    article_urls = []
+    matched_meta = {}
+    chosen_for_cse = set()
+    seen_tmp = set()
 
     # 파티션 디렉터리의 숫자가 클수록 우선 (최신)
     def partition_num(path: str) -> int:
@@ -194,7 +197,10 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
         m = re.search(r'(\d+)', base)
         return int(m.group(1)) if m else -1
 
+    stop = False
     for faiss_dir in sorted(faiss_partition_dirs, key=partition_num, reverse=True):
+        if stop:
+            break
         try:
             title_faiss_db = FAISS.load_local(
                 faiss_dir, embeddings=embed_model, allow_dangerous_deserialization=True
@@ -203,52 +209,31 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
                 continue
 
             D, I = title_faiss_db.index.search(search_vectors, k=3)
+            # CSE 순서대로, 각 제목에서 첫 유효 URL만 채택
             for j in range(len(cse_title_embs)):
+                if j in chosen_for_cse:
+                    continue
                 for i, dist in enumerate(D[j]):
                     if dist < DISTANCE_THRESHOLD:
                         faiss_idx = I[j][i]
                         docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
                         doc = title_faiss_db.docstore._dict[docstore_id]
                         url = doc.metadata.get("url")
-                        if url and url not in seen_urls:
-                            lst = candidates_by_cse.setdefault(j, [])
-                            lst.append({
-                                "url": url,
-                                "dist": float(dist),
-                                "cse_idx": j,
+                        if url and url not in seen_urls and url not in seen_tmp:
+                            article_urls.append(url)
+                            matched_meta[url] = {
                                 "matched_cse_title": cse_titles[j],
                                 "raw_cse_title": cse_raw_titles[j]
-                            })
+                            }
+                            seen_tmp.add(url)
+                            chosen_for_cse.add(j)
+                            if len(article_urls) >= MAX_ARTICLES_PER_CLAIM:
+                                stop = True
+                            break
+                if stop:
+                    break
         except Exception as e:
             logging.error(f"FAISS 검색 실패: {faiss_dir} → {e}")
-
-    # CSE 검색 결과 순서를 그대로 따르되, 각 CSE 인덱스에서 가장 가까운 URL 하나만 선택
-    article_urls = []
-    matched_meta = {}
-    seen_tmp = set()
-    for j in range(len(cse_title_embs)):
-        lst = candidates_by_cse.get(j, [])
-        if not lst:
-            continue
-        # 같은 URL이 여러 파티션에서 발견될 수 있으니 URL별 최솟값만 유지하고, 이미 선택된 URL은 제외
-        best_per_url = {}
-        for cand in lst:
-            u = cand["url"]
-            if u in seen_tmp:
-                continue
-            prev = best_per_url.get(u)
-            if (prev is None) or (cand["dist"] < prev["dist"]):
-                best_per_url[u] = cand
-        if not best_per_url:
-            continue
-        chosen = min(best_per_url.values(), key=lambda c: c["dist"])
-        u = chosen["url"]
-        article_urls.append(u)
-        matched_meta[u] = {
-            "matched_cse_title": chosen["matched_cse_title"],
-            "raw_cse_title": chosen["raw_cse_title"]
-        }
-        seen_tmp.add(u)
 
     # Fallback: CSE 기반 매칭이 한 건도 없으면, 요약 키워드 자체로 제목 FAISS를 직접 검색
     if not article_urls:
