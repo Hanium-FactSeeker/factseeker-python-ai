@@ -232,6 +232,49 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
             "raw_cse_title": chosen["raw_cse_title"]
         }
         seen_tmp.add(u)
+
+    # Fallback: CSE 기반 매칭이 한 건도 없으면, 요약 키워드 자체로 제목 FAISS를 직접 검색
+    if not article_urls:
+        try:
+            logging.info("CSE 기반 매칭 결과 없음 → 키워드 직접 FAISS 검색 시도")
+            query_vec = embed_model.embed_query(summarized_query)
+            query_np = np.array([query_vec], dtype=np.float32)
+            fallback = {}
+
+            # 최신 파티션 우선
+            for faiss_dir in sorted(faiss_partition_dirs, key=partition_num, reverse=True):
+                try:
+                    title_faiss_db = FAISS.load_local(
+                        faiss_dir, embeddings=embed_model, allow_dangerous_deserialization=True
+                    )
+                    if title_faiss_db.index.ntotal == 0:
+                        continue
+                    D, I = title_faiss_db.index.search(query_np, k=5)
+                    for i, dist in enumerate(D[0]):
+                        if dist < DISTANCE_THRESHOLD:
+                            faiss_idx = I[0][i]
+                            docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
+                            doc = title_faiss_db.docstore._dict[docstore_id]
+                            url = doc.metadata.get("url")
+                            if not url:
+                                continue
+                            cur = fallback.get(url)
+                            if (cur is None) or (dist < cur["dist"]):
+                                fallback[url] = {"dist": float(dist)}
+                except Exception as e:
+                    logging.error(f"FAISS 키워드 검색 실패: {faiss_dir} → {e}")
+
+            if fallback:
+                # 거리 오름차순으로 정렬 후 상한 적용
+                article_urls = [u for u, _ in sorted(fallback.items(), key=lambda kv: kv[1]["dist"])][:MAX_ARTICLES_PER_CLAIM]
+                # 메타데이터에는 요약 질의를 기록
+                for u in article_urls:
+                    matched_meta[u] = {
+                        "matched_cse_title": summarized_query,
+                        "raw_cse_title": summarized_query,
+                    }
+        except Exception as e:
+            logging.error(f"키워드 직접 FAISS 검색 중 오류: {e}")
     docs = []
 
     for url in article_urls:
@@ -448,13 +491,18 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
     for i, result in enumerate(gathered):
         if isinstance(result, Exception):
             claim_text = claims_to_check[i] if i < len(claims_to_check) else ""
-            logging.error(f"🛑 주장 처리 중 예외 발생: '{claim_text}' -> {result}")
+            # 예외 타입과 상세 메시지를 함께 기록해 공백 메시지 문제 방지
+            err_type = type(result).__name__
+            err_msg = str(result) or repr(result) or err_type
+            logging.error(f"🛑 주장 처리 중 예외 발생: '{claim_text}' -> {err_type}: {err_msg}")
             outputs.append({
                 "claim": claim_text,
                 "result": "error",
                 "confidence_score": 0,
                 "evidence": [],
-                "error": str(result)
+                "error": f"{err_type}: {err_msg}",
+                "error_type": err_type,
+                "error_stage": "process_claim_step"
             })
         else:
             outputs.append(result)
