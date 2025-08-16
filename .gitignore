@@ -12,6 +12,8 @@ __pycache__/
 article_faiss_cache/
 feature_faiss_db_openai/
 
+.history
+
 # OS/IDE/에디터 불필요 파일
 .DS_Store
 .vscode/

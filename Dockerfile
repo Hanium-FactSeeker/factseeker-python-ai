@@ -15,7 +15,8 @@ RUN pip install --upgrade pip \
      fastapi uvicorn[standard] python-dotenv \
      faiss-cpu langchain-openai langchain-community \
      boto3 aiohttp requests beautifulsoup4 newspaper3k \
-     youtube-transcript-api selenium numpy scikit-learn
+     "lxml[html_clean]" \
+     youtube-transcript-api selenium numpy scikit-learn langchain yt-dlp openai
 
 EXPOSE 8000
 
