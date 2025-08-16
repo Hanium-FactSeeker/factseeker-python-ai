@@ -11,6 +11,7 @@ __pycache__/
 # 로컬 벡터/캐시 디렉토리
 article_faiss_cache/
 feature_faiss_db_openai/
+.history
 
 # OS/IDE/에디터 불필요 파일
 .DS_Store
