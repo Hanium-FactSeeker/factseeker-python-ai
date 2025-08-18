@@ -11,6 +11,7 @@ from botocore.exceptions import ClientError
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.docstore.document import Document
+from datetime import datetime
 
 from core.lambdas import (
     extract_video_id,
@@ -27,7 +28,9 @@ from core.llm_chains import (
     build_factcheck_chain,
     build_reduce_similar_claims_chain,
     build_channel_type_classifier,
-    get_chat_llm
+    get_chat_llm,
+    build_keyword_extractor_chain,
+    build_three_line_summarizer_chain
 )
 from core.faiss_manager import CHUNK_CACHE_DIR
 
@@ -353,6 +356,18 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         if not transcript:
             return {"error": "Failed to load transcript"}
 
+        # Extract keywords and summary
+        keyword_extractor = build_keyword_extractor_chain()
+        summarizer = build_three_line_summarizer_chain()
+
+        keywords_task = keyword_extractor.ainvoke({"text": transcript})
+        summary_task = summarizer.ainvoke({"text": transcript})
+
+        keywords_result, summary_result = await asyncio.gather(keywords_task, summary_task)
+
+        extracted_keywords = keywords_result.content.strip() if keywords_result.content else ""
+        three_line_summary = summary_result.content.strip() if summary_result.content else ""
+
         extractor = build_claim_extractor()
         result = await extractor.ainvoke({"transcript": transcript})
         claims = [line.strip() for line in result.content.strip().split('\n') if line.strip()]
@@ -409,7 +424,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 relevance = re.search(r"관련성: (.+)", result_content)
                 fact_check_result_match = re.search(r"사실 설명 여부: (.+)", result_content)
                 justification = re.search(r"간단한 설명: (.+)", result_content)
-                snippet = re.search(r"핵심 근거 문장: (.+)", result_content)
+                snippet = re.search(r"핵심 근거 문장: (.+)", result_content, re.DOTALL)
                 url = doc.metadata.get("url")
 
                 if (
@@ -523,7 +538,10 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         "claims": outputs,
         "summary": summary,
         "channel_type": channel_type,
-        "channel_type_reason": reason
+        "channel_type_reason": reason,
+        "created_at": datetime.now().isoformat(),
+        "keywords": extracted_keywords,
+        "three_line_summary": three_line_summary
     }
 
 def parse_channel_type(llm_output: str):

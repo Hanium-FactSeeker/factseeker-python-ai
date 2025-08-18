@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 # core 폴더의 필요한 함수들을 가져옵니다.
 from services.fact_checker import run_fact_check
 from core.preload_s3_faiss import preload_faiss_from_existing_s3, CHUNK_CACHE_DIR
+from article_checker.router import create_router as create_article_router
 
 # .env 파일에서 환경 변수를 로드합니다.
 load_dotenv()
@@ -66,6 +67,9 @@ async def lifespan(app: FastAPI):
 
 # --- FastAPI 앱 생성 ---
 app = FastAPI(lifespan=lifespan)
+
+# 기사 팩트체크 라우터 추가 (기존 로직은 그대로 유지)
+app.include_router(create_article_router(lambda: faiss_partition_dirs))
 
 # --- API 엔드포인트 ---
 @app.post("/fact-check")
