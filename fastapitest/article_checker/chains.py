@@ -1,5 +1,5 @@
 from langchain_core.prompts import PromptTemplate
-from fastapitest.core.llm_chains import get_chat_llm
+from core.llm_chains import get_chat_llm
 
 
 def build_article_claim_extractor():

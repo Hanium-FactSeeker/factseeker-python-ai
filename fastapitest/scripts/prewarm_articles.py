@@ -19,8 +19,8 @@ def _resolve_imports():
     - 실패 시 fastapitest 디렉토리를 sys.path에 추가하고 패키지 내부 상대 경로로 시도
     """
     try:
-        from fastapitest.services.fact_checker import ensure_article_faiss as _ensure, embed_model as _embed
-        from fastapitest.core.preload_s3_faiss import preload_faiss_from_existing_s3 as _preload, CHUNK_CACHE_DIR as _cache
+        from services.fact_checker import ensure_article_faiss as _ensure, embed_model as _embed
+from core.preload_s3_faiss import preload_faiss_from_existing_s3 as _preload, CHUNK_CACHE_DIR as _cache
         return _ensure, _embed, _preload, _cache
     except ModuleNotFoundError:
         pkg_dir = Path(__file__).resolve().parents[1]  # fastapitest 디렉토리

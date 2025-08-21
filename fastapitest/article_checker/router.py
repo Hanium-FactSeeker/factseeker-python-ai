@@ -2,7 +2,7 @@ from typing import Callable, List
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, AnyUrl
 
-from fastapitest.article_checker.article_fact_checker import run_article_fact_check
+from article_checker.article_fact_checker import run_article_fact_check
 
 
 class ArticleFactCheckRequest(BaseModel):

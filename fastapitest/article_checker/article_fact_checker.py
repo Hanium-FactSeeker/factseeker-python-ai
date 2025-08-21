@@ -5,13 +5,13 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any
 
-from fastapitest.article_checker.chains import build_article_claim_extractor
-from fastapitest.core.lambdas import (
+from article_checker.chains import build_article_claim_extractor
+from core.lambdas import (
     get_article_text,
     calculate_fact_check_confidence,
     calculate_source_diversity_score,
 )
-from fastapitest.core.llm_chains import (
+from core.llm_chains import (
     build_claim_summarizer,
     build_reduce_similar_claims_chain,
     build_factcheck_chain,
@@ -20,7 +20,7 @@ from fastapitest.core.llm_chains import (
 )
 
 # Reuse evidence retrieval pipeline from the existing YouTube flow
-from fastapitest.services.fact_checker import (
+from services.fact_checker import (
     search_and_retrieve_docs_once,
     MAX_CONCURRENT_CLAIMS,
     MAX_CONCURRENT_FACTCHECKS,
