@@ -36,6 +36,8 @@ def _list_faiss_keys_from_s3(s3_prefix):
                 keys.append(obj["Key"])
     return keys
 
+# 온디맨드 파티션 조회 기능은 롤백
+
 def preload_faiss_from_existing_s3(s3_prefix):
     """
     지정된 S3 prefix 하위의 모든 FAISS 파티션을 로컬 캐시 디렉토리로 미리 다운로드합니다.

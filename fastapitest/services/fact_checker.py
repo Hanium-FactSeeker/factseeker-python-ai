@@ -44,6 +44,8 @@ DISTANCE_THRESHOLD = 0.8
 MAX_CONCURRENT_CLAIMS = int(os.environ.get("MAX_CONCURRENT_CLAIMS", "3"))
 MAX_CONCURRENT_FACTCHECKS = int(os.environ.get("MAX_CONCURRENT_FACTCHECKS", "7"))
 MAX_EVIDENCES_PER_CLAIM = int(os.environ.get("MAX_EVIDENCES_PER_CLAIM", "10"))
+# 파티션 검색 조기 종료 임계치: 최신 파티션에서 이 개수 이상 확보되면 다음 파티션으로 가지 않음
+PARTITION_STOP_HITS = int(os.environ.get("PARTITION_STOP_HITS", "1"))
 # --- 설정값 끝 ---
 
 try:
@@ -204,6 +206,7 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
         if stop:
             break
         try:
+            before_count = len(article_urls)
             title_faiss_db = FAISS.load_local(
                 faiss_dir, embeddings=embed_model, allow_dangerous_deserialization=True
             )
@@ -234,6 +237,9 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
                             break
                 if stop:
                     break
+            # 최신 파티션에서 일정 수 이상 확보되었으면 다음 파티션으로 진행하지 않고 종료
+            if len(article_urls) - before_count >= PARTITION_STOP_HITS:
+                stop = True
         except Exception as e:
             logging.error(f"FAISS 검색 실패: {faiss_dir} → {e}")
 
