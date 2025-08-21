@@ -417,35 +417,13 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         validated_evidence = []
         fact_checker = build_factcheck_chain()
 
-        async def factcheck_doc(doc):
-            try:
-                check_result = await fact_checker.ainvoke({"claim": claim, "context": doc.page_content})
-                result_content = check_result.content
-                relevance = re.search(r"관련성: (.+)", result_content)
-                fact_check_result_match = re.search(r"사실 설명 여부: (.+)", result_content)
-                justification = re.search(r"간단한 설명: (.+)", result_content)
-                snippet = re.search(r"핵심 근거 문장: (.+)", result_content, re.DOTALL)
-                url = doc.metadata.get("url")
-
-                if (
-                    relevance and fact_check_result_match and justification
-                    and "예" in relevance.group(1)
-                    and url and url not in url_set
-                ):
-                    url_set.add(url)
-                    return {
-                        "url": url, "relevance": "yes",
-                        "fact_check_result": fact_check_result_match.group(1).strip(),
-                        "justification": justification.group(1).strip(),
-                        "snippet": snippet.group(1).strip() if snippet else ""
-                    }
-            except Exception as e:
-                logging.error(f"    - LLM 팩트체크 체인 실행 중 오류: {e}")
-            return None
+        # 기존 개별 처리 함수는 제거하고 배치 처리만 사용
 
         # 배치 팩트체크 함수 (여러 증거를 한 번에 처리)
         async def batch_factcheck_docs(docs_batch):
             try:
+                logging.info(f"    🔄 배치 팩트체크 시작: {len(docs_batch)}개 증거")
+                
                 # 여러 증거를 하나의 컨텍스트로 합치기
                 combined_context = "\n\n---증거 구분선---\n\n".join([
                     f"[증거 {i+1}]\n{doc.page_content}" 
@@ -483,6 +461,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                                 "snippet": snippet.group(1).strip() if snippet else ""
                             })
                 
+                logging.info(f"    ✅ 배치 팩트체크 완료: {len(evidence_results)}개 증거 유효")
                 return evidence_results
                 
             except Exception as e:
