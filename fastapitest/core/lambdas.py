@@ -401,15 +401,30 @@ async def get_article_text(url: str) -> str:
     clean_url = urlunparse(parsed_url._replace(query='', fragment=''))
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 
-    # 조선일보 우선 시도
-    if "chosun.com" in parsed_url.netloc:
-        logging.info("⭐ 조선일보 기사 감지. Selenium 크롤링을 먼저 시도합니다.")
+    # 특정 언론사: Selenium 우선 (조선은 전용, 나머지는 Generic)
+    SELENIUM_FIRST_DOMAINS = [
+        "chosun.com",
+        "hani.co.kr",
+        "khan.co.kr",
+        "segye.com",
+        "hankookilbo.com",
+        "asiatoday.co.kr",
+        "seoul.co.kr",
+        "donga.com",
+        "naeil.com",
+    ]
+    if any(d in parsed_url.netloc for d in SELENIUM_FIRST_DOMAINS):
         try:
-            text = await asyncio.to_thread(extract_chosun_with_selenium, url)
+            if "chosun.com" in parsed_url.netloc:
+                logging.info("⭐ 조선일보 기사 감지. Selenium(전용) 크롤링을 먼저 시도합니다.")
+                text = await asyncio.to_thread(extract_chosun_with_selenium, url)
+            else:
+                logging.info("⭐ 특정 언론사 기사 감지. Selenium(Generic) 크롤링을 먼저 시도합니다.")
+                text = await asyncio.to_thread(_extract_generic_with_selenium, url)
             if text and len(text) > 100:
                 return _clean_text(text)
             else:
-                logging.warning("⚠️ Selenium으로 본문 추출 실패 또는 내용이 불충분합니다. 다음 방법을 시도하지 않습니다.")
+                logging.warning("⚠️ Selenium 우선 크롤링 실패 또는 내용이 불충분합니다. 폴백 없이 건너뜁니다.")
                 return ""
         except Exception as e:
             logging.error(f"❌ asyncio.to_thread Selenium 실행 중 오류: {e}")
@@ -430,44 +445,17 @@ async def get_article_text(url: str) -> str:
                     logging.info(f"✅ newspaper로 기사 텍스트 추출 완료 ({len(article.text)}자): {url}")
                     return _clean_text(article.text)
                 else:
-                    logging.warning(f"⚠️ newspaper 크롤링 결과가 불충분함. BeautifulSoup 폴백 시도: {url}")
+                    logging.warning(f"⚠️ newspaper 크롤링 결과가 불충분함. 폴백 없이 건너뜀: {url}")
+                    return ""
     except aiohttp.ClientError as e:
-        logging.warning(f"⚠️ aiohttp 클라이언트 오류 발생. 다음 방법 시도: {url} -> {e}")
-    except Exception as e:
-        logging.warning(f"⚠️ newspaper 크롤링 실패. 다음 방법 시도: {url} -> {e}")
-
-    # requests + BeautifulSoup (언론사별 선택자)
-    try:
-        logging.warning(f"⚠️ requests+BeautifulSoup으로 본문 추출 재시도 (언론사별 선택자 적용): {url}")
-        response = requests.get(clean_url, headers=headers, timeout=30)
-        response.raise_for_status()
-        html_content = response.text
-
-        extracted = _extract_article_content_with_selectors(html_content, url)
-        if extracted and len(extracted) > 100:
-            cleaned_final_text = _clean_text(extracted)
-            logging.info(f"✅ requests+BeautifulSoup (언론사별)으로 본문 추출 완료 ({len(cleaned_final_text)}자): {url}")
-            return cleaned_final_text
-        else:
-            logging.warning("⚠️ requests+BeautifulSoup (언론사별)로 본문 내용이 너무 짧음. 최종 폴백 시도.")
-    except requests.exceptions.RequestException as e:
-        logging.warning(f"⚠️ requests+BeautifulSoup (언론사별) 실패. 최종 폴백 시도: {url} -> {e}")
-    except Exception as e:
-        logging.warning(f"⚠️ BeautifulSoup 파싱 실패 (언론사별). 최종 폴백 시도: {url} -> {e}")
-
-    # 최종 폴백: Selenium (Generic)
-    logging.warning(f"⚠️ 모든 방법으로 본문 추출 실패. 최종 폴백: Selenium (Generic) 시도: {url}")
-    try:
-        text = await asyncio.to_thread(_extract_generic_with_selenium, url)
-        if text and len(text) > 100:
-            logging.info("✅ Selenium (Generic)으로 최종 본문 추출 성공")
-            return _clean_text(text)
-        else:
-            logging.warning("⚠️ Selenium (Generic)으로도 본문 추출 실패 또는 내용이 불충분합니다.")
-            return ""
-    except Exception as e:
-        logging.error(f"❌ asyncio.to_thread Selenium (Generic) 실행 중 오류: {e}")
+        logging.warning(f"⚠️ aiohttp 클라이언트 오류 발생. 폴백 없이 건너뜀: {url} -> {e}")
         return ""
+    except Exception as e:
+        logging.warning(f"⚠️ newspaper 크롤링 실패. 폴백 없이 건너뜀: {url} -> {e}")
+        return ""
+
+    # chosun 전용이 아닌 도메인은 newspaper 실패 시 폴백 없이 중단
+    return ""
 
 
 # -----------------------------
