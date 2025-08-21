@@ -443,12 +443,58 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 logging.error(f"    - LLM 팩트체크 체인 실행 중 오류: {e}")
             return None
 
+        # 배치 팩트체크 함수 (여러 증거를 한 번에 처리)
+        async def batch_factcheck_docs(docs_batch):
+            try:
+                # 여러 증거를 하나의 컨텍스트로 합치기
+                combined_context = "\n\n---증거 구분선---\n\n".join([
+                    f"[증거 {i+1}]\n{doc.page_content}" 
+                    for i, doc in enumerate(docs_batch)
+                ])
+                
+                # 한 번의 API 호출로 여러 증거 처리
+                check_result = await fact_checker.ainvoke({
+                    "claim": claim, 
+                    "context": combined_context
+                })
+                
+                result_content = check_result.content
+                
+                # 결과 파싱 (여러 증거에 대한 결과를 분리)
+                evidence_results = []
+                for i, doc in enumerate(docs_batch):
+                    url = doc.metadata.get("url")
+                    if url and url not in url_set:
+                        # 각 증거별로 결과 추출 (간단한 파싱)
+                        relevance = re.search(r"관련성: (.+)", result_content)
+                        fact_check_result_match = re.search(r"사실 설명 여부: (.+)", result_content)
+                        justification = re.search(r"간단한 설명: (.+)", result_content)
+                        snippet = re.search(r"핵심 근거 문장: (.+)", result_content, re.DOTALL)
+                        
+                        if (
+                            relevance and fact_check_result_match and justification
+                            and "예" in relevance.group(1)
+                        ):
+                            url_set.add(url)
+                            evidence_results.append({
+                                "url": url, "relevance": "yes",
+                                "fact_check_result": fact_check_result_match.group(1).strip(),
+                                "justification": justification.group(1).strip(),
+                                "snippet": snippet.group(1).strip() if snippet else ""
+                            })
+                
+                return evidence_results
+                
+            except Exception as e:
+                logging.error(f"    - 배치 LLM 팩트체크 체인 실행 중 오류: {e}")
+                return []
+
         # per-claim 문서 팩트체크 동시성 제한
         factcheck_semaphore = asyncio.Semaphore(MAX_CONCURRENT_FACTCHECKS)
 
-        async def limited_factcheck_doc(doc):
+        async def limited_batch_factcheck_docs(docs_batch):
             async with factcheck_semaphore:
-                return await factcheck_doc(doc)
+                return await batch_factcheck_docs(docs_batch)
 
         # CSE 검색은 한 번만 수행하고, 해당 결과에서 매칭된 문서만 배치로 팩트체크
         new_docs = await search_and_retrieve_docs_once(claim, faiss_partition_dirs, set())
@@ -459,14 +505,17 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 "confidence_score": 0, "evidence": []
             }
 
-        # 배치 처리로 조기 종료 가능하게 함
-        for i in range(0, len(new_docs), MAX_CONCURRENT_FACTCHECKS):
+        # 배치 처리로 조기 종료 가능하게 함 (배치 크기: 3개씩)
+        BATCH_SIZE = 3
+        for i in range(0, len(new_docs), BATCH_SIZE):
             if len(validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
                 break
-            batch = new_docs[i:i+MAX_CONCURRENT_FACTCHECKS]
-            factcheck_tasks = [limited_factcheck_doc(doc) for doc in batch]
-            factcheck_results = await asyncio.gather(*factcheck_tasks)
-            for res in factcheck_results:
+            batch = new_docs[i:i+BATCH_SIZE]
+            
+            # 배치 팩트체크 실행
+            batch_results = await limited_batch_factcheck_docs(batch)
+            
+            for res in batch_results:
                 if res:
                     validated_evidence.append(res)
                     if len(validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
