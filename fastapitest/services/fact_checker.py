@@ -41,8 +41,8 @@ MAX_ARTICLES_PER_CLAIM = 10  # ✨ 주장당 최대 검색 기사 수 (이 값�
 DISTANCE_THRESHOLD = 0.8
 
 # 동시 처리 제한 (병목 완화)
-MAX_CONCURRENT_CLAIMS = int(os.environ.get("MAX_CONCURRENT_CLAIMS", "3"))
-MAX_CONCURRENT_FACTCHECKS = int(os.environ.get("MAX_CONCURRENT_FACTCHECKS", "3"))
+MAX_CONCURRENT_CLAIMS = int(os.environ.get("MAX_CONCURRENT_CLAIMS", "7"))
+MAX_CONCURRENT_FACTCHECKS = int(os.environ.get("MAX_CONCURRENT_FACTCHECKS", "7"))
 MAX_EVIDENCES_PER_CLAIM = int(os.environ.get("MAX_EVIDENCES_PER_CLAIM", "10"))
 # --- 설정값 끝 ---
 
