@@ -178,7 +178,7 @@ async def search_news_google_cs(query: str):
 # -----------------------------
 # Article extraction (언론사 선택자 + Selenium)
 # -----------------------------
-def _extract_article_content_with_selectors(html_content: str, url: str) -> str:
+def _extract_article_content_with_selecctors(html_content: str, url: str) -> str:
     # 경향신문 구형 URL → 신형 전환
     if "news.khan.co.kr/kh_news/khan_art_view.html" in url:
         m = re.search(r'artid=(\d+)', url)
@@ -424,10 +424,27 @@ async def get_article_text(url: str) -> str:
             if text and len(text) > 100:
                 return _clean_text(text)
             else:
-                logging.warning("⚠️ Selenium 우선 크롤링 실패 또는 내용이 불충분합니다. 폴백 없이 건너뜁니다.")
-                return ""
+                logging.warning("⚠️ Selenium 우선 크롤링 실패 또는 내용이 불충분합니다. 언론사 셀렉터 폴백 시도.")
         except Exception as e:
             logging.error(f"❌ asyncio.to_thread Selenium 실행 중 오류: {e}")
+            logging.info("➡️ 언론사 셀렉터 폴백 시도")
+
+        # Fallback: requests + BeautifulSoup (언론사별 선택자)로 재시도
+        try:
+            response = requests.get(clean_url, headers=headers, timeout=15)
+            response.raise_for_status()
+            html_content = response.text
+
+            extracted = _extract_article_content_with_selectors(html_content, url)
+            if extracted and len(extracted) > 100:
+                cleaned_final_text = _clean_text(extracted)
+                logging.info(f"✅ 언론사 셀렉터로 본문 추출 완료 ({len(cleaned_final_text)}자): {url}")
+                return cleaned_final_text
+            else:
+                logging.warning("⚠️ 언론사 셀렉터 폴백도 내용이 부족합니다. 스킵합니다.")
+                return ""
+        except Exception as e:
+            logging.warning(f"⚠️ 언론사 셀렉터 폴백 실패: {url} -> {e}")
             return ""
 
     # aiohttp + newspaper
