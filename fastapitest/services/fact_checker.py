@@ -20,7 +20,8 @@ from core.lambdas import (
     get_article_text,
     clean_news_title,
     calculate_fact_check_confidence,
-    calculate_source_diversity_score
+    calculate_source_diversity_score,
+    clean_evidence_json
 )
 from core.llm_chains import (
     build_claim_extractor,
@@ -371,7 +372,18 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
         keywords_result, summary_result = await asyncio.gather(keywords_task, summary_task)
 
-        extracted_keywords = keywords_result.content.strip() if keywords_result.content else ""
+        # 키워드는 JSON 배열로 반환되도록 체인을 수정했으므로 배열 파싱을 우선 시도합니다.
+        extracted_keywords_raw = (keywords_result.content or "").strip()
+        extracted_keywords_list = []
+        try:
+            m = re.search(r"\[.*\]", extracted_keywords_raw, re.DOTALL)
+            json_text = m.group(0) if m else extracted_keywords_raw
+            parsed = json.loads(json_text)
+            if isinstance(parsed, list):
+                extracted_keywords_list = [str(k).strip() for k in parsed if str(k).strip()]
+        except Exception:
+            extracted_keywords_list = [s.strip() for s in extracted_keywords_raw.split(',') if s.strip()]
+
         three_line_summary = summary_result.content.strip() if summary_result.content else ""
 
         extractor = build_claim_extractor()
@@ -488,11 +500,14 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
         logging.info(f"--- 팩트체크 완료: '{claim}' -> 신뢰도: {confidence_score}% (증거 {len(validated_evidence)}개)")
 
+        # 증거 전처리 적용
+        cleaned_evidence = clean_evidence_json(validated_evidence[:3])
+        
         return {
             "claim": claim,
             "result": "likely_true" if validated_evidence else "insufficient_evidence",
             "confidence_score": confidence_score,
-            "evidence": validated_evidence[:3]
+            "evidence": cleaned_evidence
         }
 
     # 주장 단위 동시성 제한 (최대 3개 동시 처리)
@@ -547,7 +562,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         "channel_type": channel_type,
         "channel_type_reason": reason,
         "created_at": datetime.now().isoformat(),
-        "keywords": extracted_keywords,
+        "keywords": extracted_keywords_list,
         "three_line_summary": three_line_summary
     }
 

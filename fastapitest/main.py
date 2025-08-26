@@ -95,6 +95,7 @@ async def fact_check_endpoint(request: FactCheckRequest):
         logging.error(f"팩트체크 처리 중 심각한 오류 발생: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="내부 서버 오류가 발생했습니다.")
 
+
 @app.get("/")
 def read_root():
     return {"message": "FactSeeker AI 서버가 실행 중입니다."}

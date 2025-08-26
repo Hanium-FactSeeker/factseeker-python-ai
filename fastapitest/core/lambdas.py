@@ -178,7 +178,7 @@ async def search_news_google_cs(query: str):
 # -----------------------------
 # Article extraction (언론사 선택자 + Selenium)
 # -----------------------------
-def _extract_article_content_with_selecctors(html_content: str, url: str) -> str:
+def _extract_article_content_with_selectors(html_content: str, url: str) -> str:
     # 경향신문 구형 URL → 신형 전환
     if "news.khan.co.kr/kh_news/khan_art_view.html" in url:
         m = re.search(r'artid=(\d+)', url)
@@ -588,3 +588,125 @@ def calculate_source_diversity_score(evidence: list[dict]) -> int:
     if n == 1:
         return 1
     return 0
+
+
+# -----------------------------
+# JSON 증거 본문 전처리
+# -----------------------------
+def clean_evidence_content(content: str) -> str:
+    """
+    JSON 증거 본문에서 기자명, copyright, HTML 태그 등을 제거하는 전처리 함수
+    
+    Args:
+        content: 원본 증거 본문
+        
+    Returns:
+        전처리된 증거 본문
+    """
+    if not content:
+        return ""
+    
+    # HTML 태그 제거
+    content = re.sub(r'<[^>]+>', '', content)
+    
+    # 기자명 패턴 제거 (다양한 패턴 지원)
+    reporter_patterns = [
+        r'[가-힣]+\s*기자',  # 한글 기자명
+        r'[A-Za-z]+\s*기자',  # 영문 기자명
+        r'기자\s*[가-힣]+',  # 기자 + 한글명
+        r'기자\s*[A-Za-z]+',  # 기자 + 영문명
+        r'[가-힣]+\s*[A-Za-z]+\s*기자',  # 한글+영문 기자명
+        r'[A-Za-z]+\s*[가-힣]+\s*기자',  # 영문+한글 기자명
+        r'기자\s*[가-힣]+\s*[A-Za-z]+',  # 기자 + 한글+영문명
+        r'기자\s*[A-Za-z]+\s*[가-힣]+',  # 기자 + 영문+한글명
+    ]
+    
+    for pattern in reporter_patterns:
+        content = re.sub(pattern, '', content, flags=re.IGNORECASE)
+    
+    # Copyright 관련 텍스트 제거
+    copyright_patterns = [
+        r'Copyright\s*©?\s*\d{4}\s*[가-힣A-Za-z\s]+',
+        r'©\s*\d{4}\s*[가-힣A-Za-z\s]+',
+        r'저작권\s*©?\s*\d{4}\s*[가-힣A-Za-z\s]+',
+        r'무단전재\s*및\s*재배포\s*금지',
+        r'무단복제\s*금지',
+        r'All\s+rights\s+reserved',
+        r'저작권자\s*[가-힣A-Za-z\s]+',
+        r'본사\s*[가-힣A-Za-z\s]+',
+        r'신문사\s*[가-힣A-Za-z\s]+',
+        r'뉴스사\s*[가-힣A-Za-z\s]+',
+    ]
+    
+    for pattern in copyright_patterns:
+        content = re.sub(pattern, '', content, flags=re.IGNORECASE)
+    
+    # 언론사 관련 텍스트 제거
+    media_patterns = [
+        r'\[[가-힣A-Za-z\s]+\]',  # 대괄호로 둘러싸인 언론사명
+        r'\([가-힣A-Za-z\s]+\)',  # 괄호로 둘러싸인 언론사명
+        r'[가-힣A-Za-z\s]+뉴스',  # ~뉴스 패턴
+        r'[가-힣A-Za-z\s]+신문',  # ~신문 패턴
+        r'[가-힣A-Za-z\s]+일보',  # ~일보 패턴
+        r'[가-힣A-Za-z\s]+경제',  # ~경제 패턴
+    ]
+    
+    for pattern in media_patterns:
+        content = re.sub(pattern, '', content, flags=re.IGNORECASE)
+    
+    # 날짜/시간 관련 텍스트 제거
+    date_patterns = [
+        r'\d{4}년\s*\d{1,2}월\s*\d{1,2}일',
+        r'\d{4}-\d{1,2}-\d{1,2}',
+        r'\d{1,2}:\d{2}',  # 시간
+        r'오전\s*\d{1,2}:\d{2}',
+        r'오후\s*\d{1,2}:\d{2}',
+    ]
+    
+    for pattern in date_patterns:
+        content = re.sub(pattern, '', content)
+    
+    # 불필요한 공백 정리 (문장 구조 보존)
+    content = re.sub(r'[ \t]+', ' ', content)  # 탭과 연속 공백만 단일 공백으로
+    content = re.sub(r'\n\s*\n', '\n', content)  # 연속 줄바꿈 정리
+    content = content.strip()
+    
+    # 너무 짧아진 경우 원본 반환
+    if len(content) < 50:
+        return content
+    
+    return content
+
+
+def clean_evidence_json(evidence_list: list[dict]) -> list[dict]:
+    """
+    증거 리스트의 각 항목에서 본문을 전처리하는 함수
+    
+    Args:
+        evidence_list: 증거 리스트
+        
+    Returns:
+        전처리된 증거 리스트
+    """
+    if not evidence_list:
+        return []
+    
+    cleaned_evidence = []
+    for evidence in evidence_list:
+        cleaned_evidence_item = evidence.copy()
+        
+        # snippet 필드 전처리
+        if 'snippet' in cleaned_evidence_item:
+            cleaned_evidence_item['snippet'] = clean_evidence_content(
+                cleaned_evidence_item['snippet']
+            )
+        
+        # justification 필드 전처리
+        if 'justification' in cleaned_evidence_item:
+            cleaned_evidence_item['justification'] = clean_evidence_content(
+                cleaned_evidence_item['justification']
+            )
+        
+        cleaned_evidence.append(cleaned_evidence_item)
+    
+    return cleaned_evidence
