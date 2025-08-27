@@ -225,11 +225,67 @@ async def run_article_fact_check(article_url: str, faiss_partition_dirs: List[st
         else:
             logging.info(f"신뢰도 {confidence_score}%로 충분하므로 Google CSE 재시도 생략")
 
+        # 최종 신뢰도가 20% 이하이면 파티션 9로 재시도
+        final_confidence = confidence_score
+        final_evidence = validated_evidence
+        
+        if confidence_score <= 20 and len(validated_evidence) > 0:
+            logging.info(f"최종 신뢰도 {confidence_score}%로 낮음 → 파티션 9로 재시도: '{claim}'")
+            
+            # 파티션 9만 사용하여 재검색
+            partition_9_dirs = [dir for dir in faiss_partition_dirs if "9" in dir]
+            logging.info(f"🔍 파티션 9 검색: 전체 파티션 {len(faiss_partition_dirs)}개 중 파티션 9 포함 {len(partition_9_dirs)}개 발견")
+            if partition_9_dirs:
+                logging.info(f"파티션 9 디렉토리 {len(partition_9_dirs)}개 발견, 재검색 시작")
+                for dir in partition_9_dirs:
+                    logging.info(f"  📁 파티션 9 경로: {dir}")
+                
+                # 파티션 9로 재검색
+                partition_9_docs = await search_and_retrieve_docs_once(claim, partition_9_dirs, set(), use_google_cse=False)
+                if partition_9_docs:
+                    logging.info(f"파티션 9에서 {len(partition_9_docs)}개 문서 발견, 재팩트체크 수행")
+                    
+                    # 파티션 9 결과로 재팩트체크
+                    partition_9_validated_evidence = []
+                    for i in range(0, len(partition_9_docs), MAX_CONCURRENT_FACTCHECKS):
+                        if len(partition_9_validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
+                            break
+                        batch = partition_9_docs[i : i + MAX_CONCURRENT_FACTCHECKS]
+                        factcheck_results = await asyncio.gather(*[limited_factcheck_doc(doc) for doc in batch])
+                        for res in factcheck_results:
+                            if res and isinstance(res, dict):
+                                partition_9_validated_evidence.append(res)
+                                logging.info(f"✅ [파티션9] 주장 '{claim}' → 증거 URL: {res.get('url', 'N/A')}")
+                                if len(partition_9_validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
+                                    break
+                    
+                    # 파티션 9 결과로 신뢰도 계산
+                    if partition_9_validated_evidence:
+                        partition_9_diversity_score = calculate_source_diversity_score(partition_9_validated_evidence)
+                        partition_9_confidence = calculate_fact_check_confidence(
+                            {"source_diversity": partition_9_diversity_score, "evidence_count": min(len(partition_9_validated_evidence), 5)}
+                        )
+                        logging.info(f"파티션 9 재팩트체크 완료: 신뢰도 {partition_9_confidence}% (증거 {len(partition_9_validated_evidence)}개)")
+                        
+                        # 파티션 9 결과가 더 높으면 선택
+                        if partition_9_confidence > final_confidence:
+                            final_confidence = partition_9_confidence
+                            final_evidence = partition_9_validated_evidence
+                            logging.info(f"파티션 9 결과 선택: {partition_9_confidence}% > 기존 {confidence_score}%")
+                        else:
+                            logging.info(f"기존 결과 유지: {confidence_score}% >= 파티션 9 {partition_9_confidence}%")
+                    else:
+                        logging.info("파티션 9으로도 검증된 증거를 찾지 못함")
+                else:
+                    logging.info("파티션 9에서 문서를 찾지 못함")
+            else:
+                logging.info("파티션 9 디렉토리를 찾을 수 없음")
+
         return {
             "claim": claim,
-            "result": "likely_true" if validated_evidence else "insufficient_evidence",
-            "confidence_score": confidence_score,
-            "evidence": validated_evidence[:3],
+            "result": "likely_true" if final_evidence else "insufficient_evidence",
+            "confidence_score": final_confidence,
+            "evidence": final_evidence[:3],
         }
 
     claim_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLAIMS)

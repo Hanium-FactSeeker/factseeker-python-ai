@@ -254,7 +254,7 @@ async def search_news_naver_api(query: str):
                                 filtered_items.append({
                                     "title": item.get("title", "").replace("<b>", "").replace("</b>", ""),
                                     "link": link,
-                                    "snippet": item.get("description", "").replace("<b>", "").replace("</b>", ""),
+                                    "snippet": item.get("description", "").replace("<b>", "").replace("</b>", "").replace("**", ""),
                                     "publisher": publisher_whitelist[publisher_code],
                                     "publisher_code": publisher_code
                                 })
@@ -711,6 +711,9 @@ def clean_evidence_content(content: str) -> str:
     
     # HTML 태그 제거
     content = re.sub(r'<[^>]+>', '', content)
+    
+    # ** 제거
+    content = content.replace("**", "")
     
     # 기자명 패턴 제거 (다양한 패턴 지원)
     reporter_patterns = [
