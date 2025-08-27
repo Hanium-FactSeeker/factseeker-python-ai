@@ -176,6 +176,53 @@ async def run_article_fact_check(article_url: str, faiss_partition_dirs: List[st
             f"--- 기사 팩트체크 완료: '{claim}' -> 신뢰도: {confidence_score}% (증거 {len(validated_evidence)}개)"
         )
 
+        # 신뢰도가 20% 이하일 경우 Google CSE로 재시도
+        naver_confidence = confidence_score
+        naver_evidence = validated_evidence.copy()
+        
+        if confidence_score <= 20:
+            logging.info(f"신뢰도 {confidence_score}%로 인한 Google CSE 재시도: '{claim}'")
+            
+            # Google CSE로 재검색
+            google_docs = await search_and_retrieve_docs_once(claim, faiss_partition_dirs, set(), use_google_cse=True)
+            if google_docs:
+                logging.info(f"Google CSE로 {len(google_docs)}개 문서 발견, 재팩트체크 수행")
+                
+                # Google CSE 결과로 재팩트체크
+                google_validated_evidence = []
+                for i in range(0, len(google_docs), MAX_CONCURRENT_FACTCHECKS):
+                    if len(google_validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
+                        break
+                    batch = google_docs[i : i + MAX_CONCURRENT_FACTCHECKS]
+                    factcheck_results = await asyncio.gather(*[limited_factcheck_doc(doc) for doc in batch])
+                    for res in factcheck_results:
+                        if res:
+                            google_validated_evidence.append(res)
+                            if len(google_validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
+                                break
+                
+                # Google CSE 결과로 신뢰도 계산
+                if google_validated_evidence:
+                    google_diversity_score = calculate_source_diversity_score(google_validated_evidence)
+                    google_confidence = calculate_fact_check_confidence(
+                        {"source_diversity": google_diversity_score, "evidence_count": min(len(google_validated_evidence), 5)}
+                    )
+                    logging.info(f"Google CSE 재팩트체크 완료: 신뢰도 {google_confidence}% (증거 {len(google_validated_evidence)}개)")
+                    
+                    # 둘 중 더 높은 신뢰도 선택
+                    if google_confidence > naver_confidence:
+                        confidence_score = google_confidence
+                        validated_evidence = google_validated_evidence
+                        logging.info(f"Google CSE 결과 선택: {google_confidence}% > 네이버 {naver_confidence}%")
+                    else:
+                        logging.info(f"네이버 결과 유지: {naver_confidence}% >= Google CSE {google_confidence}%")
+                else:
+                    logging.info("Google CSE로도 검증된 증거를 찾지 못함")
+            else:
+                logging.info("Google CSE로 문서를 찾지 못함")
+        else:
+            logging.info(f"신뢰도 {confidence_score}%로 충분하므로 Google CSE 재시도 생략")
+
         return {
             "claim": claim,
             "result": "likely_true" if validated_evidence else "insufficient_evidence",

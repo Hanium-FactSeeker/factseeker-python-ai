@@ -17,6 +17,7 @@ from core.lambdas import (
     extract_video_id,
     fetch_youtube_transcript,
     search_news_naver_api,
+    search_news_google_cs,
     get_article_text,
     clean_news_title,
     calculate_fact_check_confidence,
@@ -152,7 +153,7 @@ async def ensure_article_faiss(url):
         return faiss_db
 
 # --- CSE → FAISS에서 여러 기사, url 기준 중복 없는 문서만 수집 (한도 즉시 중단) ---
-async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
+async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls, use_google_cse=False):
     summarizer = build_claim_summarizer()
     try:
         summary_result = await summarizer.ainvoke({"claim": claim})
@@ -162,10 +163,22 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
         logging.error(f"Claim 요약 실패: {e}, 원문으로 검색 진행")
         summarized_query = claim
 
-    search_results = await search_news_naver_api(summarized_query)
-    # CSE 상위 10개만 사용
-    cse_titles = [clean_news_title(item.get('title', '')) for item in search_results[:10]]
-    cse_raw_titles = [item.get('title', '') for item in search_results[:10]]
+    # 신뢰도가 0일 경우 Google CSE 사용, 그렇지 않으면 네이버 API 사용
+    if use_google_cse:
+        logging.info("🔄 신뢰도 0으로 인한 Google CSE 재시도")
+        search_results = await search_news_google_cs(summarized_query)
+        # Google CSE 결과를 네이버 API 형식으로 변환
+        cse_titles = []
+        cse_raw_titles = []
+        for item in search_results[:10]:
+            title = item.get('title', '')
+            cse_titles.append(clean_news_title(title))
+            cse_raw_titles.append(title)
+    else:
+        search_results = await search_news_naver_api(summarized_query)
+        # CSE 상위 10개만 사용
+        cse_titles = [clean_news_title(item.get('title', '')) for item in search_results[:10]]
+        cse_raw_titles = [item.get('title', '') for item in search_results[:10]]
     
 
     if not cse_titles:
@@ -324,7 +337,7 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
     return docs
 
 # --- 본문 확보된 뉴스 15개가 될 때까지 반복 확보 ---
-async def search_and_retrieve_docs(claim, faiss_partition_dirs):
+async def search_and_retrieve_docs(claim, faiss_partition_dirs, use_google_cse=False):
     collected_docs = []
     seen_urls = set()
     attempt_count = 0
@@ -333,7 +346,7 @@ async def search_and_retrieve_docs(claim, faiss_partition_dirs):
         attempt_count += 1
         logging.info(f"🔁 뉴스 수집 시도 {attempt_count}회 - 확보된 기사 수: {len(collected_docs)}")
 
-        new_docs = await search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls)
+        new_docs = await search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls, use_google_cse)
 
         if not new_docs:
             logging.warning(f"📭 수집된 문서 없음. 반복 진행 중... (현재 확보: {len(collected_docs)})")
@@ -499,6 +512,55 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         })
 
         logging.info(f"--- 팩트체크 완료: '{claim}' -> 신뢰도: {confidence_score}% (증거 {len(validated_evidence)}개)")
+
+        # 신뢰도가 20% 이하일 경우 Google CSE로 재시도
+        naver_confidence = confidence_score
+        naver_evidence = validated_evidence.copy()
+        
+        if confidence_score <= 20:
+            logging.info(f"신뢰도 {confidence_score}%로 인한 Google CSE 재시도: '{claim}'")
+            
+            # Google CSE로 재검색
+            google_docs = await search_and_retrieve_docs_once(claim, faiss_partition_dirs, set(), use_google_cse=True)
+            if google_docs:
+                logging.info(f"Google CSE로 {len(google_docs)}개 문서 발견, 재팩트체크 수행")
+                
+                # Google CSE 결과로 재팩트체크
+                google_validated_evidence = []
+                for i in range(0, len(google_docs), MAX_CONCURRENT_FACTCHECKS):
+                    if len(google_validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
+                        break
+                    batch = google_docs[i:i+MAX_CONCURRENT_FACTCHECKS]
+                    factcheck_tasks = [limited_factcheck_doc(doc) for doc in batch]
+                    factcheck_results = await asyncio.gather(*factcheck_tasks)
+                    for res in factcheck_results:
+                        if res:
+                            google_validated_evidence.append(res)
+                            if len(google_validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
+                                break
+                
+                # Google CSE 결과로 신뢰도 계산
+                if google_validated_evidence:
+                    google_diversity_score = calculate_source_diversity_score(google_validated_evidence)
+                    google_confidence = calculate_fact_check_confidence({
+                        "source_diversity": google_diversity_score,
+                        "evidence_count": min(len(google_validated_evidence), 5)
+                    })
+                    logging.info(f"Google CSE 재팩트체크 완료: 신뢰도 {google_confidence}% (증거 {len(google_validated_evidence)}개)")
+                    
+                    # 둘 중 더 높은 신뢰도 선택
+                    if google_confidence > naver_confidence:
+                        confidence_score = google_confidence
+                        validated_evidence = google_validated_evidence
+                        logging.info(f"Google CSE 결과 선택: {google_confidence}% > 네이버 {naver_confidence}%")
+                    else:
+                        logging.info(f"네이버 결과 유지: {naver_confidence}% >= Google CSE {google_confidence}%")
+                else:
+                    logging.info("Google CSE로도 검증된 증거를 찾지 못함")
+            else:
+                logging.info("Google CSE로 문서를 찾지 못함")
+        else:
+            logging.info(f"신뢰도 {confidence_score}%로 충분하므로 Google CSE 재시도 생략")
 
         # 증거 전처리 적용
         cleaned_evidence = clean_evidence_json(validated_evidence[:3])

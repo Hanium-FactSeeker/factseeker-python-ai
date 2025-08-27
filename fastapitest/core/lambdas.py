@@ -86,7 +86,94 @@ def clean_news_title(title: str) -> str:
 
 
 # -----------------------------
-# CSE 검색 (다운시프트 포함)
+# Google CSE 검색 (다운시프트 포함)
+# -----------------------------
+async def search_news_google_cs(query: str):
+    logging.info(f"Google CSE로 뉴스 검색: {query}")
+    google_api_key = os.getenv("GOOGLE_API_KEY")
+    google_cse_id = os.getenv("GOOGLE_CSE_ID")
+
+    if not google_api_key or not google_cse_id:
+        logging.error("Google CSE 키/엔진 ID 누락")
+        return []
+
+    def _simplify_ko(q: str) -> str:
+        stop = ["내부", "기류", "증언", "나오고", "있다", "있다는", "하려", "움직임이", "위원장", "발언을", "제지했다"]
+        tokens = re.split(r"\s+", q)
+        tokens = [t for t in tokens if t and t not in stop]
+        return " ".join(tokens) or q
+
+    def _mk_params(q: str, or_terms: str | None = None, start: int | None = None):
+        p = {
+            "key": google_api_key,
+            "cx": google_cse_id,
+            "q": q,
+            "num": 10,
+            "hl": "ko",
+            "gl": "kr",
+            "fields": "items(title,htmlTitle,link,displayLink,snippet),searchInformation(totalResults)"
+        }
+        if or_terms:
+            p["orTerms"] = or_terms
+        if start:
+            p["start"] = start
+        return p
+
+    url = "https://www.googleapis.com/customsearch/v1"
+
+    async def _cse_fetch(session: aiohttp.ClientSession, params: dict, max_retries: int = 2):
+        delay = 0.5
+        for attempt in range(max_retries + 1):
+            try:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                    data = await resp.json()
+                    if "error" in data:
+                        msg = data["error"].get("message")
+                        logging.error(f"Google CSE API 오류: {msg}")
+                        if msg and "quota" in msg.lower():
+                            logging.warning("경고: CSE 쿼터 초과 가능성")
+                        return []
+                    return data.get("items") or []
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                logging.warning(f"CSE 요청 실패(재시도 {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                else:
+                    return []
+
+    async with aiohttp.ClientSession(headers={"Accept": "application/json"}) as session:
+        # 1차: 원 쿼리 (+2페이지까지)
+        for attempt in range(1, 3):
+            params = _mk_params(query, start=1 + (attempt - 1) * 10 if attempt > 1 else None)
+            items = await _cse_fetch(session, params)
+            if items:
+                for it in items[:5]:
+                    logging.debug(f"[CSE] raw_title={it.get('title')!r}")
+                return items
+
+        # 2차: 방송3사 OR 확장
+        if re.search(r"\b(KBS|MBC|EBS)\b", query, flags=re.IGNORECASE):
+            params = _mk_params(_simplify_ko(query), or_terms="KBS MBC EBS")
+            items = await _cse_fetch(session, params)
+            if items:
+                for it in items[:5]:
+                    logging.debug(f"[CSE] raw_title={it.get('title')!r}")
+                return items
+
+        # 3차: 강제 축약
+        simplified = _simplify_ko(query)
+        if simplified != query:
+            params = _mk_params(simplified)
+            items = await _cse_fetch(session, params)
+            if items:
+                for it in items[:5]:
+                    logging.debug(f"[CSE] raw_title={it.get('title')!r}")
+                return items
+
+    logging.warning("📭 CSE 결과 0건 (모든 다운시프트 실패)")
+    return []
+
 # -----------------------------
 async def search_news_naver_api(query: str):
     logging.info(f"네이버 뉴스 API로 뉴스 검색: {query}")
