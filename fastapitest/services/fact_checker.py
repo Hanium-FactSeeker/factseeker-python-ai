@@ -665,7 +665,32 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             outputs.append(result)
 
     if outputs:
-        avg_score = round(sum(o['confidence_score'] for o in outputs) / len(outputs))
+        # 가중 평균 계산
+        total_weighted_score = 0
+        total_weight = 0
+        
+        for output in outputs:
+            confidence = output['confidence_score']
+            evidence_count = len(output.get('evidence', []))
+            
+            # insufficient_evidence 보정 (0% 대신 최소값 적용)
+            if confidence == 0 and evidence_count == 0:
+                confidence = 10  # 최소값
+            
+            # 가중치 계산: 증거 개수 + 신뢰도 기반
+            evidence_weight = min(evidence_count + 1, 5)  # 증거 0개=1, 1개=2, ..., 최대 5
+            confidence_weight = max(confidence / 20, 0.5)  # 신뢰도 20% 이상=1.0, 10%=0.5, 최소 0.5
+            
+            weight = evidence_weight * confidence_weight
+            total_weighted_score += confidence * weight
+            total_weight += weight
+        
+        # 가중 평균 계산
+        if total_weight > 0:
+            avg_score = round(total_weighted_score / total_weight)
+        else:
+            avg_score = 0
+            
         evidence_ratio = sum(1 for o in outputs if o["result"] == "likely_true") / len(outputs)
         summary = f"증거 확보된 주장 비율: {evidence_ratio*100:.1f}%" if len(outputs) >= 3 else f"신뢰도 평가 불가 (팩트체크 주장 수 부족: {len(outputs)}개)"
     else:
