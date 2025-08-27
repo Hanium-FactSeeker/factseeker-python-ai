@@ -739,7 +739,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         "channel_type": channel_type,
         "channel_type_reason": reason,
         "created_at": datetime.now().isoformat(),
-        "keywords": extracted_keywords_list,
+        "keywords": ", ".join(extracted_keywords_list),
         "three_line_summary": three_line_summary
     }
 
