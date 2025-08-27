@@ -733,7 +733,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
     return {
         "video_id": video_id,
         "video_url": youtube_url,
-        "video_total_confidence_score": avg_score,
+        "total_confidence_score": avg_score,
         "claims": outputs,
         "summary": summary,
         "channel_type": channel_type,
