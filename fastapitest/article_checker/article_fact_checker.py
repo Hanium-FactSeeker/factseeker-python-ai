@@ -162,8 +162,9 @@ async def run_article_fact_check(article_url: str, faiss_partition_dirs: List[st
             batch = new_docs[i : i + MAX_CONCURRENT_FACTCHECKS]
             factcheck_results = await asyncio.gather(*[limited_factcheck_doc(doc) for doc in batch])
             for res in factcheck_results:
-                if res:
+                if res and isinstance(res, dict):  # None이 아니고 dict 타입인지 확인
                     validated_evidence.append(res)
+                    logging.info(f"✅ [네이버] 주장 '{claim}' → 증거 URL: {res.get('url', 'N/A')}")
                     if len(validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
                         break
 
@@ -196,8 +197,9 @@ async def run_article_fact_check(article_url: str, faiss_partition_dirs: List[st
                     batch = google_docs[i : i + MAX_CONCURRENT_FACTCHECKS]
                     factcheck_results = await asyncio.gather(*[limited_factcheck_doc(doc) for doc in batch])
                     for res in factcheck_results:
-                        if res:
+                        if res and isinstance(res, dict):  # None이 아니고 dict 타입인지 확인
                             google_validated_evidence.append(res)
+                            logging.info(f"✅ [Google CSE] 주장 '{claim}' → 증거 URL: {res.get('url', 'N/A')}")
                             if len(google_validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
                                 break
                 
