@@ -229,7 +229,7 @@ async def run_article_fact_check(article_url: str, faiss_partition_dirs: List[st
         final_confidence = confidence_score
         final_evidence = validated_evidence
         
-        if confidence_score <= 20 and len(validated_evidence) > 0:
+        if confidence_score <= 20:
             logging.info(f"최종 신뢰도 {confidence_score}%로 낮음 → 파티션 9로 재시도: '{claim}'")
             
             # 파티션 9만 사용하여 재검색
@@ -363,4 +363,3 @@ async def run_article_fact_check(article_url: str, faiss_partition_dirs: List[st
         "keywords": extracted_keywords,
         "three_line_summary": three_line_summary,
     }
-

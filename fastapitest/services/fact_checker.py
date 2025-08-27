@@ -177,6 +177,8 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls, 
         logging.error(f"Claim 요약 실패: {e}, 원문으로 검색 진행")
         summarized_query = claim
 
+    # 파티션은 호출 시 전달된 목록을 그대로 사용 (최신 → 과거)
+
     # 신뢰도가 0일 경우 Google CSE 사용, 그렇지 않으면 네이버 API 사용
     if use_google_cse:
         logging.info("🔄 신뢰도 0으로 인한 Google CSE 재시도")
@@ -596,7 +598,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         final_confidence = confidence_score
         final_evidence = validated_evidence
         
-        if confidence_score <= 20 and len(validated_evidence) > 0:
+        if confidence_score <= 20:
             logging.info(f"최종 신뢰도 {confidence_score}%로 낮음 → 파티션 9로 재시도: '{claim}'")
             
             # 파티션 9만 사용하여 재검색
