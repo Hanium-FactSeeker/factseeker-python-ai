@@ -97,37 +97,98 @@ async def search_news_naver_api(query: str):
         logging.error("네이버 API 키/시크릿 누락")
         return []
 
+    # 언론사 코드 화이트리스트
+    publisher_whitelist = {
+        "032": "경향신문",
+        "005": "국민일보", 
+        "096": "내일신문",
+        "020": "동아일보",
+        "021": "문화일보",
+        "081": "서울신문",
+        "022": "세계일보",
+        "277": "아시아투데이",
+        "023": "조선일보",
+        "025": "중앙일보",
+        "028": "한겨레",
+        "469": "한국일보"
+    }
+
     url = "https://openapi.naver.com/v1/search/news.json"
     headers = {
         "X-Naver-Client-Id": naver_client_id,
         "X-Naver-Client-Secret": naver_client_secret,
         "Accept": "application/json"
     }
-    params = {
-        "query": query,
-        "display": 10,  # 최대 10개 결과
-        "sort": "sim"  # sim (유사도순) 또는 date (날짜순)
-    }
+
+    # 중복 제거를 위한 링크 세트
+    seen_links = set()
+    filtered_items = []
+    start = 1
+    display = 100
+    max_start = 1000
 
     async with aiohttp.ClientSession(headers=headers) as session:
-        try:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                items = []
-                for item in data.get("items", []):
-                    items.append({
-                        "title": item.get("title", "").replace("<b>", "").replace("</b>", ""),
-                        "link": item.get("link", ""),
-                        "snippet": item.get("description", "").replace("<b>", "").replace("</b>", "")
-                    })
-                return items
-        except aiohttp.ClientError as e:
-            logging.error(f"네이버 뉴스 API 요청 실패: {e}")
-            return []
-        except Exception as e:
-            logging.error(f"네이버 뉴스 API 처리 중 오류: {e}")
-            return []
+        while start <= max_start and len(filtered_items) < 10:
+            params = {
+                "query": query,
+                "display": display,
+                "sort": "sim",
+                "start": start
+            }
+
+            try:
+                logging.info(f"네이버 뉴스 API 호출: start={start}, display={display}")
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    
+                    items = data.get("items", [])
+                    if not items:
+                        logging.info("더 이상 검색 결과가 없습니다.")
+                        break
+                    
+                    # 필터링 및 중복 제거
+                    for item in items:
+                        link = item.get("link", "")
+                        
+                        # 중복 체크
+                        if link in seen_links:
+                            continue
+                        
+                        # 언론사 코드 추출: /article/{언론사코드}/
+                        import re
+                        match = re.search(r'/article/(\d+)/', link)
+                        if match:
+                            publisher_code = match.group(1)
+                            
+                            # 화이트리스트 체크
+                            if publisher_code in publisher_whitelist:
+                                seen_links.add(link)
+                                filtered_items.append({
+                                    "title": item.get("title", "").replace("<b>", "").replace("</b>", ""),
+                                    "link": link,
+                                    "snippet": item.get("description", "").replace("<b>", "").replace("</b>", ""),
+                                    "publisher": publisher_whitelist[publisher_code],
+                                    "publisher_code": publisher_code
+                                })
+                                
+                                if len(filtered_items) >= 10:
+                                    break
+                    
+                    logging.info(f"현재 누적된 화이트리스트 기사: {len(filtered_items)}개")
+                    
+                    # 다음 페이지로 이동
+                    start += display
+                    
+            except aiohttp.ClientError as e:
+                logging.error(f"네이버 뉴스 API 요청 실패: {e}")
+                break
+            except Exception as e:
+                logging.error(f"네이버 뉴스 API 처리 중 오류: {e}")
+                break
+
+    logging.info(f"최종 결과: {len(filtered_items)}개의 화이트리스트 기사 수집 완료")
+    return filtered_items[:10]  # 최대 10개 반환
 
 
 # -----------------------------
