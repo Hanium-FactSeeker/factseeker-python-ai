@@ -16,7 +16,7 @@ from datetime import datetime
 from core.lambdas import (
     extract_video_id,
     fetch_youtube_transcript,
-    search_news_google_cs,
+    search_news_naver_api,
     get_article_text,
     clean_news_title,
     calculate_fact_check_confidence,
@@ -162,14 +162,14 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
         logging.error(f"Claim 요약 실패: {e}, 원문으로 검색 진행")
         summarized_query = claim
 
-    search_results = await search_news_google_cs(summarized_query)
+    search_results = await search_news_naver_api(summarized_query)
     # CSE 상위 10개만 사용
     cse_titles = [clean_news_title(item.get('title', '')) for item in search_results[:10]]
     cse_raw_titles = [item.get('title', '') for item in search_results[:10]]
-    cse_urls = [item.get('link') for item in search_results[:10]]
+    
 
     if not cse_titles:
-        logging.warning("Google 검색 결과에서 제목을 찾을 수 없어 탐색을 종료합니다.")
+        logging.warning("네이버 검색 결과에서 제목을 찾을 수 없어 탐색을 종료합니다.")
         return []
 
     # 임베딩 호출 안정화: 소규모 재시도/예외 보호
@@ -247,7 +247,7 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls):
     # Fallback: CSE 기반 매칭이 한 건도 없으면, 요약 키워드 자체로 제목 FAISS를 직접 검색
     if not article_urls:
         try:
-            logging.info("CSE 기반 매칭 결과 없음 → 키워드 직접 FAISS 검색 시도")
+            logging.info("네이버 검색 기반 매칭 결과 없음 → 키워드 직접 FAISS 검색 시도")
             # 임베딩 쿼리도 재시도/예외 보호
             def _embed_query_with_retry(q, retries=1):
                 delay = 0.5
