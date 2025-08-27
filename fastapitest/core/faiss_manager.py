@@ -23,6 +23,11 @@ except Exception as e:
 
 # --- 내부 헬퍼 함수 ---
 def _normalize_url(url):
+    # Be defensive: ensure we operate on a string
+    if url is None:
+        url = ""
+    elif not isinstance(url, str):
+        url = str(url)
     parsed = urlparse(url)
     netloc = parsed.netloc.replace('www.', '')
     params = parse_qs(parsed.query)
@@ -31,7 +36,8 @@ def _normalize_url(url):
     return urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, query, parsed.fragment)).rstrip('/')
 
 def _url_to_cache_key(url):
-    return hashlib.md5(_normalize_url(url).encode()).hexdigest()
+    norm = _normalize_url(url)
+    return hashlib.md5(norm.encode()).hexdigest()
 
 def _download_from_s3(local_dir_path, s3_key_prefix):
     if not s3: return False

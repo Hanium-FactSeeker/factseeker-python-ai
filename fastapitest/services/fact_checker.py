@@ -66,7 +66,19 @@ url_locks = {}
 
 # --- URL 기반 캐시 경로 및 S3 동기화 ---
 def url_to_cache_key(url):
-    return hashlib.md5(url.encode()).hexdigest()
+    """Create a stable cache key from a URL-like value.
+
+    Be defensive: metadata from external indices can sometimes contain
+    non-string values (e.g., float NaN). Convert to string to avoid
+    AttributeError from calling .encode() on non-strings.
+    """
+    if url is None:
+        raw = ""
+    elif not isinstance(url, str):
+        raw = str(url)
+    else:
+        raw = url
+    return hashlib.md5(raw.encode()).hexdigest()
 
 def get_article_faiss_path(url):
     return os.path.join(CHUNK_CACHE_DIR, url_to_cache_key(url))
@@ -154,6 +166,8 @@ async def ensure_article_faiss(url):
 
 # --- CSE → FAISS에서 여러 기사, url 기준 중복 없는 문서만 수집 (한도 즉시 중단) ---
 async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls, use_google_cse=False):
+    def _is_valid_url(value) -> bool:
+        return isinstance(value, str) and value.strip().lower().startswith(("http://", "https://"))
     summarizer = build_claim_summarizer()
     try:
         summary_result = await summarizer.ainvoke({"claim": claim})
@@ -229,27 +243,40 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls, 
                 continue
 
             D, I = title_faiss_db.index.search(search_vectors, k=3)
-            # CSE 순서대로, 각 제목에서 첫 유효 URL만 채택
+            # CSE 순서대로, 각 제목에서 첫 유효 URL만 채택 (후보를 안정 정렬 후 선택)
             for j in range(len(cse_title_embs)):
                 if j in chosen_for_cse:
                     continue
+                # 후보 수집: 임계값을 통과한 것만 모음
+                candidates = []
                 for i, dist in enumerate(D[j]):
                     if dist < DISTANCE_THRESHOLD:
                         faiss_idx = I[j][i]
                         docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
-                        doc = title_faiss_db.docstore._dict[docstore_id]
-                        url = doc.metadata.get("url")
-                        if url and url not in seen_urls and url not in seen_tmp:
-                            article_urls.append(url)
-                            matched_meta[url] = {
-                                "matched_cse_title": cse_titles[j],
-                                "raw_cse_title": cse_raw_titles[j]
-                            }
-                            seen_tmp.add(url)
-                            chosen_for_cse.add(j)
-                            if len(article_urls) >= MAX_ARTICLES_PER_CLAIM:
-                                stop = True
-                            break
+                        doc = title_faiss_db.docstore._dict.get(docstore_id)
+                        if not doc:
+                            continue
+                        url = (doc.metadata or {}).get("url")
+                        # 정렬을 위한 안전한 기본값
+                        url_key = url if isinstance(url, str) else ""
+                        candidates.append((float(dist), str(docstore_id), url_key, url))
+
+                # 안정 정렬: 거리 오름차순 → docstore_id → url 사전순
+                candidates.sort(key=lambda t: (t[0], t[1], t[2]))
+
+                # 정렬된 후보 중 첫 유효 URL 선택
+                for _dist, _doc_id, _url_key, url in candidates:
+                    if _is_valid_url(url) and url not in seen_urls and url not in seen_tmp:
+                        article_urls.append(url)
+                        matched_meta[url] = {
+                            "matched_cse_title": cse_titles[j],
+                            "raw_cse_title": cse_raw_titles[j]
+                        }
+                        seen_tmp.add(url)
+                        chosen_for_cse.add(j)
+                        if len(article_urls) >= MAX_ARTICLES_PER_CLAIM:
+                            stop = True
+                        break
                 if stop:
                     break
             # 최신 파티션에서 일정 수 이상 확보되었으면 다음 파티션으로 진행하지 않고 종료
@@ -299,7 +326,7 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls, 
                             docstore_id = title_faiss_db.index_to_docstore_id[faiss_idx]
                             doc = title_faiss_db.docstore._dict[docstore_id]
                             url = doc.metadata.get("url")
-                            if not url:
+                            if not _is_valid_url(url):
                                 continue
                             cur = fallback.get(url)
                             if (cur is None) or (dist < cur["dist"]):
@@ -308,8 +335,8 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls, 
                     logging.error(f"FAISS 키워드 검색 실패: {faiss_dir} → {e}")
 
             if fallback:
-                # 거리 오름차순으로 정렬 후 상한 적용
-                article_urls = [u for u, _ in sorted(fallback.items(), key=lambda kv: kv[1]["dist"])][:MAX_ARTICLES_PER_CLAIM]
+                # 거리 오름차순, 동률 시 URL 사전순으로 정렬 후 상한 적용
+                article_urls = [u for u, _ in sorted(fallback.items(), key=lambda kv: (kv[1]["dist"], kv[0]))][:MAX_ARTICLES_PER_CLAIM]
                 # 메타데이터에는 요약 질의를 기록
                 for u in article_urls:
                     matched_meta[u] = {
@@ -324,7 +351,7 @@ async def search_and_retrieve_docs_once(claim, faiss_partition_dirs, seen_urls, 
         if faiss_db:
             for doc in faiss_db.docstore._dict.values():
                 actual_url = doc.metadata.get("url")
-                if actual_url and actual_url not in seen_urls:
+                if _is_valid_url(actual_url) and actual_url not in seen_urls:
                     meta = matched_meta.get(actual_url, {"matched_cse_title": "", "raw_cse_title": ""})
                     docs.append(Document(
                         page_content=doc.page_content,

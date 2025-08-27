@@ -58,6 +58,10 @@ def _find_partitions(target_partition: int | None = None) -> List[str]:
     return parts
 
 
+def _is_valid_url(value: str | None) -> bool:
+    return isinstance(value, str) and value.strip().lower().startswith(("http://", "https://"))
+
+
 def _urls_from_partitions(parts: List[str]) -> List[str]:
     urls: List[str] = []
     seen: Set[str] = set()
@@ -66,7 +70,7 @@ def _urls_from_partitions(parts: List[str]) -> List[str]:
             db = FAISS.load_local(part, embeddings=embed_model, allow_dangerous_deserialization=True)
             for doc in db.docstore._dict.values():
                 u = (doc.metadata or {}).get("url")
-                if u and u not in seen:
+                if _is_valid_url(u) and u not in seen:
                     seen.add(u)
                     urls.append(u)
         except Exception as e:
