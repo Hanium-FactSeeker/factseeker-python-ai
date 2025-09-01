@@ -1,8 +1,13 @@
 import os
+import asyncio
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import boto3
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
+import contextlib
 from dotenv import load_dotenv
 
 # core 폴더의 필요한 함수들을 가져옵니다.
@@ -23,6 +28,93 @@ class FactCheckRequest(BaseModel):
 # --- FAISS 데이터 로드를 위한 변수 ---
 faiss_partition_dirs = []
 
+
+def _kst_now() -> datetime:
+    return datetime.now(ZoneInfo("Asia/Seoul"))
+
+
+def _compute_month_kst() -> str:
+    return _kst_now().strftime("%Y%m")
+
+
+def _refresh_faiss_partition_dirs():
+    """Rescan local cache for partition_* folders and refresh the global list."""
+    if not os.path.exists(CHUNK_CACHE_DIR):
+        return
+    faiss_partition_dirs.clear()
+
+    def partition_num(name: str) -> int:
+        try:
+            base = os.path.basename(name)
+            num = int(''.join(ch for ch in base if ch.isdigit()))
+            return num
+        except Exception:
+            return -1
+
+    items = [
+        os.path.join(CHUNK_CACHE_DIR, item)
+        for item in os.listdir(CHUNK_CACHE_DIR)
+        if os.path.isdir(os.path.join(CHUNK_CACHE_DIR, item)) and item.startswith("partition_")
+    ]
+    for item_path in sorted(items, key=partition_num, reverse=True):
+        faiss_partition_dirs.append(item_path)
+
+
+def _remove_local_partition(prefix: str):
+    import shutil
+    part = os.path.basename(os.path.dirname(prefix.rstrip('/')))
+    local_dir = os.path.join(CHUNK_CACHE_DIR, part)
+    if os.path.isdir(local_dir):
+        shutil.rmtree(local_dir, ignore_errors=True)
+        logging.info(f"🧹 로컬 파티션 삭제: {local_dir}")
+
+
+async def _watch_titles_preload_task(base_prefix: str, poll_interval_sec: float = 120.0, include_partition_10: bool = True):
+    """Background watcher: monitors S3 title partitions and re-preloads on change.
+
+    - Watches monthly partition (Asia/Seoul). Optionally also partition_10.
+    - On index.faiss change (with index.pkl present), removes local partition and re-preloads just that prefix.
+    - Refreshes global faiss_partition_dirs after each reload.
+    """
+    s3 = boto3.client("s3")
+    bucket = os.environ.get("S3_BUCKET_NAME", "factseeker-faiss-db")
+    seen: dict[str, str] = {}
+
+    def prefixes_now() -> list[str]:
+        ym = _compute_month_kst()
+        monthly = f"{base_prefix.rstrip('/')}/partition_{ym}/"
+        res = [monthly]
+        if include_partition_10:
+            res.append(f"{base_prefix.rstrip('/')}/partition_10/")
+        return res
+
+    def head(key: str):
+        try:
+            return s3.head_object(Bucket=bucket, Key=key)
+        except Exception:
+            return None
+
+    while True:
+        try:
+            for prefix in prefixes_now():
+                faiss_key = f"{prefix}index.faiss"
+                pkl_key = f"{prefix}index.pkl"
+                faiss_head = head(faiss_key)
+                pkl_head = head(pkl_key)
+                if not faiss_head or not pkl_head:
+                    continue
+                tag = f"{faiss_head.get('ETag')}_{faiss_head.get('LastModified').timestamp()}"
+                if seen.get(prefix) != tag:
+                    logging.info(f"🔔 S3 변경 감지: {faiss_key} → 제목 프리로드 재실행")
+                    _remove_local_partition(prefix)
+                    preload_faiss_from_existing_s3(prefix)
+                    _refresh_faiss_partition_dirs()
+                    seen[prefix] = tag
+        except Exception as e:
+            logging.warning(f"제목 프리로드 워처 오류(계속 진행): {e}")
+
+        await asyncio.sleep(poll_interval_sec)
+
 # --- FastAPI Lifespan Manager ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -31,37 +123,32 @@ async def lifespan(app: FastAPI):
     
     # 제목 FAISS가 저장된 정확한 S3 경로를 지정합니다.
     TITLE_FAISS_S3_PREFIX = "feature_faiss_db_openai_partition/"
-    
-    # ✨✨✨ 수정된 부분: 'await'와 인수를 모두 제거합니다. ✨✨✨
-    preload_faiss_from_existing_s3(TITLE_FAISS_S3_PREFIX)
-    
-    # 로컬 캐시 폴더에서 로드된 파티션 디렉토리 목록을 전역 변수에 저장합니다.
-    if os.path.exists(CHUNK_CACHE_DIR):
-        faiss_partition_dirs.clear()
-        # 파티션명에 포함된 숫자가 클수록 최신으로 간주하여 내림차순 정렬
-        def partition_num(name: str) -> int:
-            try:
-                base = os.path.basename(name)
-                # 예: partition_12 -> 12
-                num = int(''.join(ch for ch in base if ch.isdigit()))
-                return num
-            except Exception:
-                return -1
 
-        items = [
-            os.path.join(CHUNK_CACHE_DIR, item)
-            for item in os.listdir(CHUNK_CACHE_DIR)
-            if os.path.isdir(os.path.join(CHUNK_CACHE_DIR, item)) and item.startswith("partition_")
-        ]
-        for item_path in sorted(items, key=partition_num, reverse=True):
-            faiss_partition_dirs.append(item_path)
+    # 최초 1회 프리로드
+    preload_faiss_from_existing_s3(TITLE_FAISS_S3_PREFIX)
+    _refresh_faiss_partition_dirs()
     
     if faiss_partition_dirs:
         logging.info(f"✅ {len(faiss_partition_dirs)}개의 제목 FAISS 파티션을 성공적으로 로드했습니다.")
     else:
         logging.warning("⚠️ 로드된 제목 FAISS 파티션이 없습니다. 제목 기반 검색이 작동하지 않을 수 있습니다.")
         
-    yield
+    # 백그라운드 워처 시작 (S3 변경 시 제목 프리로드 재실행)
+    watch_enabled = os.environ.get("TITLE_PRELOAD_WATCH", "1") in ("1", "true", "TRUE", "yes", "YES")
+    watch_interval = float(os.environ.get("TITLE_PRELOAD_WATCH_INTERVAL", "120"))
+    include_p10 = os.environ.get("TITLE_PRELOAD_INCLUDE_P10", "1") in ("1", "true", "TRUE", "yes", "YES")
+    watch_task = None
+    if watch_enabled:
+        logging.info(f"🕒 제목 프리로드 감시 시작(interval={watch_interval}s, include_p10={include_p10})")
+        watch_task = asyncio.create_task(_watch_titles_preload_task(TITLE_FAISS_S3_PREFIX, watch_interval, include_p10))
+
+    try:
+        yield
+    finally:
+        if watch_task:
+            watch_task.cancel()
+            with contextlib.suppress(Exception):
+                await watch_task
     # 서버 종료 시 실행될 코드
     logging.info("애플리케이션 종료...")
 
