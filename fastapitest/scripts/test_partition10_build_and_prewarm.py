@@ -6,6 +6,7 @@ import glob
 import time
 import shutil
 import logging
+import warnings
 import subprocess
 from typing import List, Optional
 
@@ -689,8 +690,9 @@ def trigger_prewarm_partition10(concurrency: int = 3, limit: int = 0, s3_prefix_
         "--limit",
         str(limit),
     ]
-    logging.info(f"prewarm 시작: {' '.join(cmd)}")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    logging.info(f"prewarm 시작: {' '.join(cmd)} (cwd={repo_root})")
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_root)
     if proc.returncode != 0:
         logging.error(f"prewarm 실패(rc={proc.returncode})\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
     else:
@@ -703,6 +705,12 @@ def trigger_prewarm_partition10(concurrency: int = 3, limit: int = 0, s3_prefix_
 # -------------------------------
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+    # Suppress noisy openpyxl default style warning
+    warnings.filterwarnings(
+        "ignore",
+        message="Workbook contains no default style, apply openpyxl's default",
+        category=UserWarning,
+    )
 
     # 고정 테스트 기간(환경변수로도 오버라이드 가능)
     start_date = os.environ.get("TEST_START_DATE", "2025-08-26")

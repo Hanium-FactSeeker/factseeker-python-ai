@@ -180,23 +180,9 @@ async def _bounded_prewarm(urls: List[str], concurrency: int, min_delay: float, 
     await asyncio.gather(*tasks)
 
 
-async def main_async(prefix: str, source: str, url_file: str | None, limit: int, concurrency: int, partition_number: int | None, min_delay: float, max_delay: float, preload_wait_timeout: float, preload_poll_interval: float, force_reload: bool):
+async def main_async(prefix: str, source: str, url_file: str | None, limit: int, concurrency: int, partition_number: int | None, min_delay: float, max_delay: float, preload_wait_timeout: float, preload_poll_interval: float):
     if source == "partitions":
         logging.info(f"🚀 제목 FAISS S3 프리로드 시작 (prefix={prefix})")
-        # 강제 리로드 요청 시: 대상 파티션의 로컬 캐시 삭제로 항상 최신 상태 재다운로드
-        if force_reload:
-            try:
-                targets = _expected_partitions_from_s3(prefix)
-                if partition_number is not None:
-                    targets = {f"partition_{partition_number}"}
-                for part in targets:
-                    local_dir = os.path.join(CHUNK_CACHE_DIR, part)
-                    if os.path.isdir(local_dir):
-                        import shutil
-                        shutil.rmtree(local_dir, ignore_errors=True)
-                        logging.info(f"🧹 강제 리로드: 로컬 캐시 삭제 -> {local_dir}")
-            except Exception as e:
-                logging.warning(f"강제 리로드 처리 중 경고(계속 진행): {e}")
         _acquire_preload_barrier()
         try:
             preload_faiss_from_existing_s3(prefix)
@@ -240,7 +226,6 @@ def main():
     p.add_argument("--max-delay", type=float, default=5.0, help="각 URL 처리 전 최대 대기 시간 (초)")
     p.add_argument("--preload-wait-timeout", type=float, default=900.0, help="프리로드 완료 대기 최대 시간(초)")
     p.add_argument("--preload-poll-interval", type=float, default=3.0, help="프리로드 상태 폴링 주기(초)")
-    p.add_argument("--force-reload", action="store_true", help="프리로드 전 대상 파티션 로컬 캐시 삭제")
     args = p.parse_args()
 
     asyncio.run(main_async(
@@ -254,7 +239,6 @@ def main():
         max_delay=args.max_delay,
         preload_wait_timeout=args.preload_wait_timeout,
         preload_poll_interval=args.preload_poll_interval,
-        force_reload=args.force_reload,
     ))
 
 
