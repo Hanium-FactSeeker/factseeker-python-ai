@@ -690,7 +690,7 @@ def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings,
 # -------------------------------
 # Prewarm trigger
 # -------------------------------
-def trigger_prewarm_partition10(concurrency: int = 3, limit: int = 0, s3_prefix_base: str = "feature_faiss_db_openai_partition/", urls: Optional[List[str]] = None) -> int:
+def trigger_prewarm_partition10(concurrency: int = 3, limit: int = 0, s3_prefix_base: str = "feature_faiss_db_openai_partition/", urls: Optional[List[str]] = None, background: bool = False) -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     cmd = [os.sys.executable, "-m", "fastapitest.scripts.prewarm_articles"]
     if urls:
@@ -713,12 +713,57 @@ def trigger_prewarm_partition10(concurrency: int = 3, limit: int = 0, s3_prefix_
         cmd += ["--source", "partitions", "--prefix", prefix, "--force-reload"]
     cmd += ["--concurrency", str(concurrency), "--limit", str(limit)]
     logging.info(f"🧭 prewarm 시작: {' '.join(cmd)} (cwd={repo_root})")
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_root)
-    if proc.returncode != 0:
-        logging.error(f"❌ prewarm 실패(rc={proc.returncode})\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+
+    if background:
+        # 백그라운드 실행: 즉시 반환하고 로그는 파일로 기록
+        try:
+            logs_dir = os.path.join(repo_root, "logs")
+            os.makedirs(logs_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            log_path = os.path.join(logs_dir, f"prewarm_{TARGET_PARTITION}_{ts}.log")
+            with open(log_path, "a", buffering=1, encoding="utf-8") as f:
+                p = subprocess.Popen(
+                    cmd,
+                    cwd=repo_root,
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    env=env,
+                    start_new_session=True,
+                )
+            logging.info(f"🧩 prewarm 백그라운드 시작 (PID={p.pid}, log={log_path})")
+            return 0
+        except Exception as e:
+            logging.error(f"❌ prewarm 백그라운드 실행 오류: {e}")
+            return 1
+
+    # 포그라운드 실행: 실시간 로그 스트리밍
+    try:
+        with subprocess.Popen(
+            cmd,
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        ) as p:
+            assert p.stdout is not None
+            for line in p.stdout:
+                logging.info(f"prewarm> {line.rstrip()}")
+            rc = p.wait()
+    except Exception as e:
+        logging.error(f"❌ prewarm 실행 오류: {e}")
+        return 1
+
+    if rc != 0:
+        logging.error(f"❌ prewarm 실패(rc={rc})")
     else:
-        logging.info(f"✅ prewarm 완료\nSTDOUT:\n{proc.stdout}")
-    return proc.returncode
+        logging.info("✅ prewarm 완료")
+    return rc
 
 
 # -------------------------------
@@ -780,6 +825,19 @@ def main():
             logging.info("📝 CSV 로컬 저장 완료(필수 컬럼): %s", csv_path)
         except Exception as e:
             logging.warning("CSV 저장 실패(계속 진행): %s", e)
+    else:
+        # CSV 저장이 비활성화되어도 컬럼 매핑이 정상인지 로그로 확인 가능하게 처리
+        try:
+            selected, missing = [], []
+            for c in REQUIRED_CSV_COLUMNS:
+                (selected if c in df.columns else missing).append(c)
+            logging.info(
+                "✅ 컬럼 조정 확인 완료 (CSV 비저장 모드). 사용=%s, 누락=%s",
+                selected,
+                missing,
+            )
+        except Exception as e:
+            logging.warning("CSV 비저장 모드에서 컬럼 매핑 확인 실패(계속 진행): %s", e)
     used_urls = build_and_upload_partition10(df, embeddings, bucket, s3_prefix)
 
     # 3) prewarm 트리거(자동 크롤링)
@@ -788,6 +846,7 @@ def main():
         limit=int(os.environ.get("PREWARM_LIMIT", "0")),
         s3_prefix_base=s3_prefix,
         urls=used_urls,
+        background=os.environ.get("PREWARM_BACKGROUND", "0") in ("1", "true", "TRUE", "yes", "YES"),
     )
     if rc != 0:
         raise SystemExit(rc)

@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import glob
 import time
@@ -6,7 +7,7 @@ import shutil
 import logging
 import subprocess
 import csv
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import List, Tuple, Optional
 
@@ -27,18 +28,6 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.keys import Keys
 
-# Optional: build from existing Excel files (merge → DF → embed) without Selenium
-try:
-    from fastapitest.scripts.merge_excels_to_csv_and_build import (
-        collect_excel_files as _collect_excel_files,
-        merge_excels_to_csv_from_list as _merge_excels_to_csv_from_list,
-        REQUIRED_COLUMNS as _REQUIRED_COLUMNS,
-    )
-except Exception:
-    _collect_excel_files = None
-    _merge_excels_to_csv_from_list = None
-    _REQUIRED_COLUMNS = None
-
 
 def _kst_now() -> datetime:
     return datetime.now(ZoneInfo("Asia/Seoul"))
@@ -46,6 +35,41 @@ def _kst_now() -> datetime:
 
 def compute_partition_month_kst() -> str:
     return _kst_now().strftime("%Y%m")
+
+
+def _parse_hhmm(value: str) -> Optional[tuple[int, int]]:
+    m = re.match(r"^(\d{1,2}):(\d{2})$", value.strip())
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if 0 <= h <= 23 and 0 <= mi <= 59:
+        return h, mi
+    return None
+
+
+def _next_kst_datetime(hour: int, minute: int) -> datetime:
+    now = _kst_now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target = target + timedelta(days=1)
+    return target
+
+
+def _sleep_until_kst(hour: int, minute: int) -> None:
+    target = _next_kst_datetime(hour, minute)
+    now = _kst_now()
+    secs = (target - now).total_seconds()
+    mins = int(secs // 60)
+    logging.info(f"⏰ 예약 실행 대기: {target.strftime('%Y-%m-%d %H:%M KST')} (~{mins}분)")
+    # 긴 대기는 중간중간 로그를 찍으며 기다린다
+    remaining = secs
+    while remaining > 0:
+        chunk = 300 if remaining > 600 else 60 if remaining > 120 else 10 if remaining > 30 else remaining
+        time.sleep(chunk)
+        remaining -= chunk
+        if remaining > 0:
+            left_m = int(max(0, remaining) // 60)
+            logging.info(f"... 대기 중 (~{left_m}분 남음)")
 
 
 def ensure_dir(path: str) -> None:
@@ -85,19 +109,7 @@ def move_to_data_folder(src_path: str) -> str:
 ## CSV는 로컬 저장만 수행(요청에 따라 S3 업로드는 제거)
 
 
-def _build_df_from_local_excels(input_dir: Optional[str], files_env: Optional[str], write_csv_path: Optional[str]) -> pd.DataFrame:
-    if _collect_excel_files is None or _merge_excels_to_csv_from_list is None:
-        raise RuntimeError("merge_excels_to_csv_and_build 모듈을 불러올 수 없습니다.")
-    excel_files = _collect_excel_files(input_dir, files_env)
-    if not excel_files:
-        raise FileNotFoundError("엑셀 파일(.xlsx/.xls)을 찾을 수 없습니다. INPUT_EXCEL_FILES 또는 INPUT_EXCEL_DIR를 확인하세요.")
-    logging.info("🗂️ 병합 대상 파일 수: %d", len(excel_files))
-    for p in excel_files:
-        logging.info("   - %s", p)
-    out_csv = write_csv_path if write_csv_path else os.devnull
-    df = _merge_excels_to_csv_from_list(excel_files, out_csv, _REQUIRED_COLUMNS)
-    logging.info("🧮 병합 DataFrame 로드 완료: rows=%d", len(df))
-    return df
+# Note: merge_excels_to_csv_and_build integration removed. This script always collects 1-day via Selenium.
 
 
 def build_and_upload_month_partition(
@@ -651,6 +663,118 @@ def _trigger_prewarm_after_upload(urls: List[str], concurrency: int = 3, limit: 
 
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
+    # 백그라운드 실행 모드: 자기 자신을 분리된 세션으로 재실행하고 즉시 반환
+    if os.environ.get("RUN_BIGKINDS_BACKGROUND", "0") in ("1", "true", "TRUE", "yes", "YES") \
+       and os.environ.get("RUN_BIGKINDS_DETACHED", "0") != "1":
+        try:
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            logs_dir = os.path.join(repo_root, "logs")
+            os.makedirs(logs_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            log_path = os.path.join(logs_dir, f"run_bigkinds_{ts}.log")
+            cmd = [sys.executable, "-m", "fastapitest.scripts.run_bigkinds_collect_and_build"]
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            env["RUN_BIGKINDS_DETACHED"] = "1"
+            with open(log_path, "a", buffering=1, encoding="utf-8") as f:
+                p = subprocess.Popen(
+                    cmd,
+                    cwd=repo_root,
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    env=env,
+                    start_new_session=True,
+                )
+            logging.info(f"🧩 run_bigkinds 백그라운드 시작 (PID={p.pid}, log={log_path})")
+            return
+        except Exception as e:
+            logging.error(f"run_bigkinds 백그라운드 실행 실패: {e}")
+            # 계속해서 포그라운드 모드로 진행
+
+    # 예약 실행 옵션: RUN_AT_KST=HH:MM, RUN_DAILY=1
+    run_at_kst = os.environ.get("RUN_AT_KST") or os.environ.get("RUN_BIGKINDS_RUN_AT_KST")
+    run_daily = os.environ.get("RUN_DAILY", "0") in ("1", "true", "TRUE", "yes", "YES")
+    if run_at_kst:
+        parsed = _parse_hhmm(run_at_kst)
+        if not parsed:
+            logging.warning(f"RUN_AT_KST 형식이 올바르지 않습니다(HH:MM): {run_at_kst}. 즉시 실행합니다.")
+        else:
+            h, mi = parsed
+            _sleep_until_kst(h, mi)
+            # 만약 매일 반복이면, 이 함수가 한 번 실행 후 루프 돌도록 아래에서 처리
+
+    def _run_once():
+        # 환경 변수
+        user_id = os.environ.get("BIGKINDS_USER_ID")
+        user_pw = os.environ.get("BIGKINDS_USER_PW")
+        if not user_id or not user_pw:
+            raise SystemExit("환경변수 BIGKINDS_USER_ID/BIGKINDS_USER_PW가 필요합니다.")
+
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise SystemExit("환경변수 OPENAI_API_KEY가 필요합니다.")
+
+        bucket = os.environ.get("S3_BUCKET_NAME", "factseeker-faiss-db")
+        s3_prefix = os.environ.get("S3_INDEX_PREFIX", "feature_faiss_db_openai_partition/")
+        download_dir = os.environ.get("DOWNLOAD_DIR", os.path.abspath("./downloads"))
+        headless = os.environ.get("HEADLESS", "1") in ("1", "true", "TRUE", "yes", "YES")
+        # CSV 파이프라인 옵션 (로컬 저장만; S3 업로드는 비활성)
+        write_csv = os.environ.get("WRITE_CSV", "1") in ("1", "true", "TRUE", "yes", "YES")
+        logging.info("🧾 실행 파라미터: bucket=%s, prefix=%s, headless=%s", bucket, s3_prefix, headless)
+
+        # 파티션 방식: 기본은 당월(서울시간)
+        partition_month = os.environ.get("PARTITION_MONTH") or compute_partition_month_kst()
+
+        # 1) 1일 수집: BigKinds 엑셀 다운로드 → CSV(선택) → DF 로드
+        logging.info("📥 BigKinds 다운로드 시작 (1일, KST)")
+        downloaded = bigkinds_login_and_download(user_id, user_pw, download_dir, headless=headless)
+        moved = move_to_data_folder(downloaded)
+        logging.info(f"📦 다운로드 파일 정리: {moved}")
+        # 엑셀 로드 및 정규화
+        df = pd.read_excel(moved)
+        df.columns = [str(c).strip().replace("\n", "") for c in df.columns]
+        # CSV 저장(필수 컬럼만)
+        if write_csv:
+            csv_path = os.path.splitext(moved)[0] + ".csv"
+            try:
+                required_cols = ["일자", "언론사", "제목", "URL", "특성추출(가중치순 상위 50개)"]
+                out = pd.DataFrame()
+                for c in required_cols:
+                    if c in df.columns:
+                        out[c] = df[c]
+                    else:
+                        out[c] = ""
+                out = out.fillna("")
+                out.to_csv(csv_path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+                logging.info(f"📝 CSV 로컬 저장 완료(필수 컬럼): {csv_path}")
+            except Exception as e:
+                logging.warning(f"CSV 저장 실패(계속 진행): {e}")
+        logging.info("🧱 타이틀 인덱스 병합/업로드 시작")
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=openai_api_key)
+        part_name, used_urls = build_and_upload_month_partition(df, embeddings, bucket, s3_prefix, partition_month)
+        logging.info(f"✅ 업로드 완료: s3://{bucket}/{s3_prefix}{part_name}/ (pkl→faiss)")
+
+        # 3) (옵션) 업로드 직후 본문 프리워밍: 파일 모드로 새 URL만 처리
+        prewarm_enabled = os.environ.get("PREWARM_AFTER_UPLOAD", "1") in ("1", "true", "TRUE", "yes", "YES")
+        if prewarm_enabled:
+            logging.info(f"🔥 본문 프리워밍 시작 (urls={len(used_urls)})")
+            _trigger_prewarm_after_upload(
+                urls=used_urls,
+                concurrency=int(os.environ.get("PREWARM_CONCURRENCY", "3")),
+                limit=int(os.environ.get("PREWARM_LIMIT", "0")),
+            )
+
+    if run_daily and run_at_kst and _parse_hhmm(run_at_kst):
+        while True:
+            _run_once()
+            # 다음 실행까지 대기
+            h, mi = _parse_hhmm(run_at_kst)
+            _sleep_until_kst(h, mi)
+    else:
+        _run_once()
 
     # 환경 변수
     user_id = os.environ.get("BIGKINDS_USER_ID")
