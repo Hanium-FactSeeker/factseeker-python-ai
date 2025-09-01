@@ -162,8 +162,7 @@ def choose_politics_category(driver, wait):
 # Date input
 # -------------------------------
 def _ensure_date_direct_input_mode(driver) -> None:
-    """기간 입력을 '직접입력/사용자 지정' 모드로 전환 시도."""
-    js = """
+    js = r'''
     return (function(){
       function clickNode(n){
         try{ n.scrollIntoView({block:'center'}); n.click(); return true; }catch(e){ return false; }
@@ -172,7 +171,7 @@ def _ensure_date_direct_input_mode(driver) -> None:
       for (const t of labels){
         const nodes = Array.from(document.querySelectorAll('label,button,a,span,div'));
         for (const n of nodes){
-          const s = (n.innerText||'').replace(/\\s+/g,' ').trim();
+          const s = (n.innerText||'').replace(/\s+/g,' ').trim();
           if (s && s.includes(t)) { if (clickNode(n)) return 'text'; }
         }
       }
@@ -185,7 +184,7 @@ def _ensure_date_direct_input_mode(driver) -> None:
       }
       return '';
     })();
-    """
+    '''
     try:
         mode = driver.execute_script(js)
         if mode:
@@ -194,8 +193,9 @@ def _ensure_date_direct_input_mode(driver) -> None:
         pass
 
 
+
 def set_date_range_with_events(driver, start_str: str, end_str: str):
-    js = """
+    js = r'''
     (function(){
       function setAndDispatch(id, val){
         var el = document.getElementById(id);
@@ -211,8 +211,9 @@ def set_date_range_with_events(driver, start_str: str, end_str: str):
       setAndDispatch('search-begin-date', arguments[0]);
       setAndDispatch('search-end-date', arguments[1]);
     })();
-    """
+    '''
     driver.execute_script(js, start_str, end_str)
+
 
 
 def set_date_range_robust(driver, start_str: str, end_str: str, retries: int = 3) -> None:
@@ -242,25 +243,432 @@ def set_date_range_robust(driver, start_str: str, end_str: str, retries: int = 3
     _open_step_panel(driver, "collapse-step-1")
     _ensure_date_direct_input_mode(driver)
 
+
     for attempt in range(1, retries + 1):
         # A. JS 주입 + 이벤트
         try:
-            js = """
+            js = r'''
             (function(s,e){
-              function setVal(id, val){
+            function setVal(id, val){
                 var el = document.getElementById(id);
                 if(!el) return false;
                 try { el.removeAttribute('readonly'); } catch(_){}
                 el.value = val;
                 if (window.jQuery){
-                  try { window.jQuery(el).val(val).trigger('input').trigger('change'); } catch(_){}
+                try { window.jQuery(el).val(val).trigger('input').trigger('change'); } catch(_){}
                 }
                 el.dispatchEvent(new Event('input', {bubbles:true}));
                 el.dispatchEvent(new Event('change', {bubbles:true}));
                 return true;
-              }
-              var ok1 = setVal('search-begin-date', s);
-              var ok2 = setVal('search-end-date', e);
-              document.activeElement && document.activeElement.blur && document.activeElement.blur();
-              document.body && document.body.click && document.body.click();
-              return ok1 && ok2;
+            }
+            var ok1 = setVal('search-begin-date', s);
+            var ok2 = setVal('search-end-date', e);
+            document.activeElement && document.activeElement.blur && document.activeElement.blur();
+            document.body && document.body.click && document.body.click();
+            return ok1 && ok2;
+            })(arguments[0], arguments[1]);
+            '''
+            driver.execute_script(js, start_str, end_str)
+        except Exception:
+            pass
+
+        time.sleep(0.5)
+        _accept_unexpected_alerts(driver, wait_timeout=0.7)
+
+        begin_val, end_val = driver.execute_script(
+            "return [document.getElementById('search-begin-date')?.value, document.getElementById('search-end-date')?.value];"
+        )
+        if begin_val == start_str and end_val == end_str:
+            return
+
+        # B. 폴백: 키보드 입력
+        try:
+            b = driver.find_element(By.ID, 'search-begin-date')
+            e = driver.find_element(By.ID, 'search-end-date')
+            for el, val in ((b, start_str), (e, end_str)):
+                driver.execute_script("arguments[0].removeAttribute('readonly');", el)
+                _scroll_into_view(driver, el)
+                el.click(); time.sleep(0.05)
+                el.send_keys(Keys.CONTROL, 'a'); time.sleep(0.05)
+                el.send_keys(val); time.sleep(0.05)
+                el.send_keys(Keys.TAB)
+            time.sleep(0.5)
+            _accept_unexpected_alerts(driver, wait_timeout=0.7)
+            begin_val, end_val = driver.execute_script(
+                "return [document.getElementById('search-begin-date')?.value, document.getElementById('search-end-date')?.value];"
+            )
+            if begin_val == start_str and end_val == end_str:
+                return
+        except Exception:
+            pass
+
+        logging.info(f"날짜 재시도 필요(시도 {attempt}/{retries}): begin={begin_val}, end={end_val}")
+        time.sleep(0.4)
+
+    # 마지막 시도
+    set_date_range_with_events(driver, start_str, end_str)
+    time.sleep(0.4)
+    _accept_unexpected_alerts(driver, wait_timeout=0.7)
+
+
+# -------------------------------
+# 분석기사 필터
+# -------------------------------
+def apply_analysis_article_filter(driver, wait, max_retry: int = 3) -> bool:
+    """'분석기사' 체크 후 '적용하기'까지 신뢰성 있게 수행."""
+    _open_step_panel(driver, "collapse-step-2")  # 필터/조건 패널
+
+    for i in range(1, max_retry + 1):
+        try:
+            cb = WebDriverWait(driver, 7).until(EC.presence_of_element_located((By.ID, "filter-tm-use")))
+            _scroll_into_view(driver, cb)
+
+            # 1) 라벨 우선 클릭
+            try:
+                label = driver.find_element(By.CSS_SELECTOR, "label[for='filter-tm-use']")
+                _scroll_into_view(driver, label)
+                driver.execute_script("arguments[0].click();", label)
+                time.sleep(0.2)
+            except Exception:
+                pass
+
+            # 2) 체크 상태 강제 + 이벤트 트리거
+            is_checked = driver.execute_script("return !!document.getElementById('filter-tm-use')?.checked;")
+            if not is_checked:
+                js_force = """
+                (function(){
+                  var el = document.getElementById('filter-tm-use');
+                  if(!el) return false;
+                  el.checked = true;
+                  el.dispatchEvent(new Event('click', {bubbles:true}));
+                  el.dispatchEvent(new Event('input', {bubbles:true}));
+                  el.dispatchEvent(new Event('change', {bubbles:true}));
+                  return el.checked === true;
+                })();
+                """
+                is_checked = driver.execute_script(js_force)
+                time.sleep(0.2)
+
+            if not is_checked:
+                # 마지막 시도: 체크박스 본체 클릭
+                try:
+                    _scroll_into_view(driver, cb)
+                    cb.click()
+                    time.sleep(0.2)
+                    is_checked = driver.execute_script("return !!document.getElementById('filter-tm-use')?.checked;")
+                except Exception:
+                    pass
+
+            if not is_checked:
+                logging.warning(f"분석기사 체크 실패(시도 {i}/{max_retry}) - 다시 시도")
+                _accept_unexpected_alerts(driver, wait_timeout=0.5)
+                continue
+
+            # 3) '적용하기' 버튼 클릭 (다중 셀렉터)
+            apply_candidates = [
+                (By.XPATH, "//button[contains(normalize-space(.), '적용하기')]"),
+                (By.XPATH, "//a[contains(normalize-space(.), '적용하기')]"),
+                (By.CSS_SELECTOR, "button.btn-apply"),
+                (By.CSS_SELECTOR, "button.apply"),
+                (By.CSS_SELECTOR, "button.filter-apply"),
+            ]
+            applied = False
+            for by, sel in apply_candidates:
+                try:
+                    btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((by, sel)))
+                    _scroll_into_view(driver, btn)
+                    driver.execute_script("arguments[0].click();", btn)
+                    applied = True
+                    break
+                except Exception:
+                    continue
+
+            if not applied:
+                # 최후의 수단: 텍스트 포함 임의 버튼 탐색
+                try:
+                    btn = driver.find_element(By.XPATH, "//button[contains(., '적용하기') or contains(., '적용')]")
+                    _scroll_into_view(driver, btn)
+                    driver.execute_script("arguments[0].click();", btn)
+                    applied = True
+                except Exception:
+                    pass
+
+            if not applied:
+                logging.warning(f"적용하기 버튼 클릭 실패(시도 {i}/{max_retry})")
+                _accept_unexpected_alerts(driver, wait_timeout=0.5)
+                continue
+
+            _accept_unexpected_alerts(driver, wait_timeout=1.0)
+            time.sleep(1.2)
+
+            still_checked = driver.execute_script("return !!document.getElementById('filter-tm-use')?.checked;")
+            logging.info("✅ 분석기사 체크 및 적용하기 완료 (checked=%s)", still_checked)
+            return True
+
+        except Exception as e:
+            logging.warning(f"분석기사 처리 중 예외(시도 {i}/{max_retry}): {e}")
+            _accept_unexpected_alerts(driver, wait_timeout=0.8)
+            try:
+                driver.save_screenshot(f"error_filter_try{i}.png")
+            except Exception:
+                pass
+            time.sleep(0.6)
+
+    return False
+
+
+# -------------------------------
+# Driver setup
+# -------------------------------
+def setup_driver(download_dir: str, headless: bool) -> tuple[webdriver.Chrome, WebDriverWait]:
+    opts = Options()
+    prefs = {
+        "download.default_directory": os.path.abspath(download_dir),
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "safebrowsing.enabled": True,
+        "profile.default_content_settings.popups": 0,
+    }
+    opts.add_experimental_option("prefs", prefs)
+
+    # 잡음 로그 억제 (DEPRECATED_ENDPOINT 등)
+    opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+    opts.add_argument("--log-level=3")
+
+    if headless:
+        opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--window-size=1400,900")
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=opts)
+    wait = WebDriverWait(driver, 15)
+    return driver, wait
+
+
+# -------------------------------
+# BigKinds flow (merged & hardened)
+# -------------------------------
+def download_bigkinds_range(user_id: str, user_pw: str, start_date: str, end_date: str, download_dir: str, headless: bool = True) -> str:
+    """지정 날짜 범위(YYYY-MM-DD ~ YYYY-MM-DD)로 BigKinds 엑셀 다운로드."""
+    driver, wait = setup_driver(download_dir, headless=headless)
+    try:
+        # 1) 접속 + 로그인
+        driver.get("https://www.bigkinds.or.kr")
+        time.sleep(2)
+        membership = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "li.topMembership")))
+        ActionChains(driver).move_to_element(membership).perform()
+        time.sleep(0.6)
+        login_link = wait.until(EC.element_to_be_clickable((By.XPATH, '//a[text()="로그인"]')))
+        driver.execute_script("arguments[0].click();", login_link)
+        wait.until(EC.visibility_of_element_located((By.ID, "login-user-id"))).send_keys(user_id)
+        driver.find_element(By.ID, "login-user-password").send_keys(user_pw)
+        wait.until(EC.element_to_be_clickable((By.ID, "login-btn"))).click()
+        time.sleep(3)
+
+        # 2) 뉴스 검색 페이지
+        driver.get("https://www.bigkinds.or.kr/v2/news/index.do")
+        time.sleep(2)
+
+        # 3) 언론사: 전국일간지
+        select_national_dailies(driver, wait)
+
+        # 4) 통합분류: 정치
+        choose_politics_category(driver, wait)
+
+        # 5) 기간: 직접 날짜 입력
+        set_date_range_robust(driver, start_date, end_date)
+        time.sleep(0.6)
+
+        # 6) 검색 적용 (검색하기)
+        search_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button.btn.btn-search.news-search-btn.news-report-search-btn')))
+        _scroll_into_view(driver, search_btn)
+        ActionChains(driver).move_to_element(search_btn).click().perform()
+        time.sleep(3)
+
+        # 7) 분석기사 체크 → '적용하기'까지
+        ok_tm = apply_analysis_article_filter(driver, wait, max_retry=3)
+        if not ok_tm:
+            logging.warning("분석기사 체크/적용 보장 실패 (진행은 계속)")
+
+        # 8) STEP3 열고 엑셀 다운로드
+        _open_step_panel(driver, "collapse-step-3")
+        time.sleep(0.4)
+        excel_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button.news-download-btn.mobile-excel-download')))
+        _scroll_into_view(driver, excel_btn)
+        ActionChains(driver).move_to_element(excel_btn).click().perform()
+
+        # 9) 다운로드 완료
+        return wait_for_download_complete(download_dir)
+
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+# -------------------------------
+# FAISS partition build/upload
+# -------------------------------
+def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings, bucket: str, s3_prefix_base: str) -> None:
+    s3 = boto3.client("s3")
+    part_name = TARGET_PARTITION
+    s3_part_prefix = f"{s3_prefix_base.rstrip('/')}/{part_name}"
+    work_dir = os.path.abspath(os.path.join(".tmp", part_name))
+    if os.path.isdir(work_dir):
+        shutil.rmtree(work_dir, ignore_errors=True)
+    ensure_dir(work_dir)
+
+    # 기존 인덱스 가져오기(있으면)
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix=f"{s3_part_prefix}/")
+    if resp.get("Contents"):
+        for obj in resp["Contents"]:
+            key = obj["Key"]
+            if key.endswith("index.faiss") or key.endswith("index.pkl"):
+                dst = os.path.join(work_dir, os.path.basename(key))
+                s3.download_file(bucket, key, dst)
+
+    # 기존 인덱스 로드
+    try:
+        db = FAISS.load_local(work_dir, embeddings=embeddings, allow_dangerous_deserialization=True)
+    except Exception:
+        db = None
+
+    # 컬럼 식별
+    df = df.copy()
+    df.columns = [str(c).strip().replace("\n", "") for c in df.columns]
+    title_candidates = ["제목", "기사제목", "title", "Title"]
+    url_candidates = ["URL", "원문URL", "url", "링크", "link", "Link"]
+    tcol = next((c for c in df.columns if c in title_candidates), None)
+    ucol = next((c for c in df.columns if c in url_candidates), None)
+    if not tcol or not ucol:
+        raise ValueError(f"제목/URL 컬럼을 찾을 수 없습니다. 컬럼들: {list(df.columns)}")
+
+    existing = set()
+    if db:
+        for d in db.docstore._dict.values():
+            u = (d.metadata or {}).get("url")
+            if isinstance(u, str):
+                existing.add(u.strip())
+
+    docs: List[Document] = []
+    seen = set()
+    for _, row in df.iterrows():
+        title = str(row.get(tcol, "")).strip()
+        url = str(row.get(ucol, "")).strip()
+        if not title or not re.match(r"^https?://", url):
+            continue
+        if url in existing or url in seen:
+            continue
+        seen.add(url)
+        docs.append(Document(page_content=title, metadata={"url": url}))
+
+    if db and docs:
+        new_db = FAISS.from_documents(docs, embeddings)
+        db.merge_from(new_db)
+        db.save_local(work_dir)
+    elif not db and docs:
+        db = FAISS.from_documents(docs, embeddings)
+        db.save_local(work_dir)
+    elif not db and not docs:
+        logging.info("신규 추가 문서가 없어 기존 인덱스를 유지합니다.")
+
+    # 업로드 순서: pkl → faiss
+    if os.path.exists(os.path.join(work_dir, "index.pkl")) and os.path.exists(os.path.join(work_dir, "index.faiss")):
+        for name in ("index.pkl", "index.faiss"):
+            s3.upload_file(os.path.join(work_dir, name), bucket, f"{s3_part_prefix}/{name}")
+        logging.info(f"업로드 완료: s3://{bucket}/{s3_part_prefix}/ (pkl→faiss)")
+    else:
+        logging.warning("업로드할 인덱스 파일이 없습니다.")
+
+    shutil.rmtree(work_dir, ignore_errors=True)
+
+
+# -------------------------------
+# Prewarm trigger
+# -------------------------------
+def trigger_prewarm_partition10(concurrency: int = 3, limit: int = 0, s3_prefix_base: str = "feature_faiss_db_openai_partition/") -> int:
+    prefix = f"{s3_prefix_base.rstrip('/')}/{TARGET_PARTITION}/"
+    cmd = [
+        os.sys.executable,
+        "-m",
+        "fastapitest.scripts.prewarm_articles",
+        "--source",
+        "partitions",
+        "--prefix",
+        prefix,
+        "--force-reload",
+        "--concurrency",
+        str(concurrency),
+        "--limit",
+        str(limit),
+    ]
+    logging.info(f"prewarm 시작: {' '.join(cmd)}")
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        logging.error(f"prewarm 실패(rc={proc.returncode})\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+    else:
+        logging.info(f"prewarm 완료\nSTDOUT:\n{proc.stdout}")
+    return proc.returncode
+
+
+# -------------------------------
+# Entrypoint
+# -------------------------------
+def main():
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
+    # 고정 테스트 기간(환경변수로도 오버라이드 가능)
+    start_date = os.environ.get("TEST_START_DATE", "2025-08-26")
+    end_date = os.environ.get("TEST_END_DATE", "2025-09-01")  # 최신 포함해서 테스트하면 좋음
+
+    # 필수 환경 변수
+    user_id = os.environ.get("BIGKINDS_USER_ID")
+    user_pw = os.environ.get("BIGKINDS_USER_PW")
+    if not user_id or not user_pw:
+        raise SystemExit("환경변수 BIGKINDS_USER_ID/BIGKINDS_USER_PW 필요")
+
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_api_key:
+        raise SystemExit("환경변수 OPENAI_API_KEY 필요")
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=openai_api_key)
+
+    # 선택 환경 변수
+    bucket = os.environ.get("S3_BUCKET_NAME", "factseeker-faiss-db")
+    s3_prefix = os.environ.get("S3_INDEX_PREFIX", "feature_faiss_db_openai_partition/")
+    download_dir = os.environ.get("DOWNLOAD_DIR", os.path.abspath("./downloads_test"))
+    headless = os.environ.get("HEADLESS", "1") in ("1", "true", "TRUE", "yes", "YES")
+
+    logging.info(f"테스트 범위: {start_date} ~ {end_date} → {TARGET_PARTITION}")
+
+    # 1) BigKinds 다운로드
+    downloaded = download_bigkinds_range(user_id, user_pw, start_date, end_date, download_dir, headless=headless)
+    logging.info(f"다운로드 완료: {downloaded}")
+
+    # 2) 빌드/업로드
+    df = pd.read_excel(downloaded)
+    build_and_upload_partition10(df, embeddings, bucket, s3_prefix)
+
+    # 3) prewarm 트리거(자동 크롤링)
+    rc = trigger_prewarm_partition10(
+        concurrency=int(os.environ.get("PREWARM_CONCURRENCY", "3")),
+        limit=int(os.environ.get("PREWARM_LIMIT", "0")),
+        s3_prefix_base=s3_prefix,
+    )
+    if rc != 0:
+        raise SystemExit(rc)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
+    
