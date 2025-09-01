@@ -653,12 +653,31 @@ def _trigger_prewarm_after_upload(urls: List[str], concurrency: int = 3, limit: 
             f.write(u.strip() + "\n")
     cmd += ["--source", "file", "--file", url_file, "--concurrency", str(concurrency), "--limit", str(limit)]
     logging.info(f"prewarm 시작: {' '.join(cmd)} (cwd={repo_root})")
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_root)
-    if proc.returncode != 0:
-        logging.error(f"prewarm 실패(rc={proc.returncode})\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+    # 실시간 출력 스트리밍
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    try:
+        with subprocess.Popen(
+            cmd,
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        ) as p:
+            assert p.stdout is not None
+            for line in p.stdout:
+                logging.info(f"prewarm> {line.rstrip()}")
+            rc = p.wait()
+    except Exception as e:
+        logging.error(f"prewarm 실행 오류: {e}")
+        return 1
+    if rc != 0:
+        logging.error(f"prewarm 실패(rc={rc})")
     else:
-        logging.info(f"prewarm 완료\nSTDOUT:\n{proc.stdout}")
-    return proc.returncode
+        logging.info("prewarm 완료")
+    return rc
 
 
 def main():
