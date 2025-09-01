@@ -89,19 +89,22 @@ def download_bigkinds_range(user_id: str, user_pw: str, start_date: str, end_dat
         time.sleep(2)
 
         # 언론사: 전국일간지
-        driver.execute_script("document.querySelector('a[href=\\"#srch-tab2\\"]').click();")
+        tab2 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab2']")))
+        tab2.click()
         time.sleep(0.5)
         driver.execute_script("document.getElementById('전국일간지').click();")
         time.sleep(0.5)
 
         # 통합분류: 정치
-        driver.execute_script("document.querySelector('a[href=\\"#srch-tab3\\"]').click();")
+        tab3 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab3']")))
+        tab3.click()
         time.sleep(0.5)
         wait.until(EC.element_to_be_clickable((By.XPATH, '//span[@data-role="display" and text()="정치"]'))).click()
         time.sleep(0.5)
 
         # 기간: 직접 날짜 입력
-        driver.execute_script("document.querySelector('a[href=\\"#srch-tab1\\"]').click();")
+        tab1 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab1']")))
+        tab1.click()
         time.sleep(0.3)
         driver.execute_script(f"document.getElementById('search-begin-date').value = '{start_date}';")
         driver.execute_script(f"document.getElementById('search-end-date').value = '{end_date}';")
@@ -274,4 +277,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

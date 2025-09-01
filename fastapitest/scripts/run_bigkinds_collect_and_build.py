@@ -194,19 +194,22 @@ def bigkinds_login_and_download(
         time.sleep(2)
 
         # 언론사: 전국일간지
-        driver.execute_script("document.querySelector('a[href=\"#srch-tab2\"]').click();")
+        tab2 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab2']")))
+        tab2.click()
         time.sleep(0.5)
         driver.execute_script("document.getElementById('전국일간지').click();")
         time.sleep(0.5)
 
         # 통합분류: 정치
-        driver.execute_script("document.querySelector('a[href=\"#srch-tab3\"]').click();")
+        tab3 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab3']")))
+        tab3.click()
         time.sleep(0.5)
         wait.until(EC.element_to_be_clickable((By.XPATH, '//span[@data-role="display" and text()="정치"]'))).click()
         time.sleep(0.5)
 
         # 기간: 1일
-        driver.execute_script("document.querySelector('a[href=\"#srch-tab1\"]').click();")
+        tab1 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab1']")))
+        tab1.click()
         time.sleep(0.3)
         one_day_label = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'label[for="date1-7"]')))
         driver.execute_script("arguments[0].click();", one_day_label)
@@ -276,4 +279,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
