@@ -28,6 +28,7 @@ from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.keys import Keys
 
 TARGET_PARTITION = "partition_10"
+REQUIRED_CSV_COLUMNS = ["일자", "언론사", "제목", "URL", "특성추출(가중치순 상위 50개)"]
 
 
 # -------------------------------
@@ -105,6 +106,7 @@ def _open_tab(driver, css_selector: str):
 # -------------------------------
 def select_national_dailies(driver, wait):
     """언론사 탭에서 '전국일간지'를 안정적으로 체크."""
+    logging.info("📰 언론사 탭 진입 및 '전국일간지' 선택 시도")
     _open_tab(driver, "a[href='#srch-tab2']")
     time.sleep(0.5)
 
@@ -141,11 +143,12 @@ def select_national_dailies(driver, wait):
         driver.execute_script("arguments[0].click();", node)
         time.sleep(0.2)
     except Exception:
-        logging.warning("전국일간지 선택에 실패했습니다. 계속 진행합니다.")
+        logging.warning("⚠️ 전국일간지 선택에 실패했습니다. 계속 진행합니다.")
 
 
 def choose_politics_category(driver, wait):
     """통합분류 탭에서 '정치' 선택."""
+    logging.info("🏷️ 통합분류 탭 진입 및 '정치' 선택 시도")
     _open_tab(driver, "a[href='#srch-tab3']")
     time.sleep(0.3)
     try:
@@ -154,7 +157,7 @@ def choose_politics_category(driver, wait):
         node.click()
         time.sleep(0.2)
     except Exception:
-        logging.warning("통합분류 '정치' 선택 실패. 계속 진행합니다.")
+        logging.warning("⚠️ 통합분류 '정치' 선택 실패. 계속 진행합니다.")
 
 
 # -------------------------------
@@ -236,6 +239,7 @@ def set_date_range_robust(driver, start_str: str, end_str: str, retries: int = 3
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", start_str) or not re.match(r"^\d{4}-\d{2}-\d{2}$", end_str):
         raise ValueError(f"날짜 형식은 YYYY-MM-DD 이어야 합니다. start={start_str}, end={end_str}")
 
+    logging.info(f"📅 기간 설정 시도: {start_str} ~ {end_str}")
     # STEP1 확보 + 직접입력 모드
     _open_tab(driver, "a[href='#srch-tab1']")
     _open_step_panel(driver, "collapse-step-1")
@@ -299,7 +303,7 @@ def set_date_range_robust(driver, start_str: str, end_str: str, retries: int = 3
         except Exception:
             pass
 
-        logging.info(f"날짜 재시도 필요(시도 {attempt}/{retries}): begin={begin_val}, end={end_val}")
+        logging.info(f"⟳ 날짜 재시도 필요(시도 {attempt}/{retries}): begin={begin_val}, end={end_val}")
         time.sleep(0.4)
 
     # 마지막 시도
@@ -313,6 +317,7 @@ def set_date_range_robust(driver, start_str: str, end_str: str, retries: int = 3
 # -------------------------------
 def apply_analysis_article_filter(driver, wait, max_retry: int = 3) -> bool:
     """'분석기사' 체크 후 '적용하기'까지 신뢰성 있게 수행."""
+    logging.info("🧩 '분석기사' 체크 및 '적용하기' 수행")
     _open_step_panel(driver, "collapse-step-2")  # 필터/조건 패널
 
     for i in range(1, max_retry + 1):
@@ -357,7 +362,7 @@ def apply_analysis_article_filter(driver, wait, max_retry: int = 3) -> bool:
                     pass
 
             if not is_checked:
-                logging.warning(f"분석기사 체크 실패(시도 {i}/{max_retry}) - 다시 시도")
+                logging.warning(f"⚠️ 분석기사 체크 실패(시도 {i}/{max_retry}) - 다시 시도")
                 _accept_unexpected_alerts(driver, wait_timeout=0.5)
                 continue
 
@@ -391,7 +396,7 @@ def apply_analysis_article_filter(driver, wait, max_retry: int = 3) -> bool:
                     pass
 
             if not applied:
-                logging.warning(f"적용하기 버튼 클릭 실패(시도 {i}/{max_retry})")
+                logging.warning(f"⚠️ 적용하기 버튼 클릭 실패(시도 {i}/{max_retry})")
                 _accept_unexpected_alerts(driver, wait_timeout=0.5)
                 continue
 
@@ -403,7 +408,7 @@ def apply_analysis_article_filter(driver, wait, max_retry: int = 3) -> bool:
             return True
 
         except Exception as e:
-            logging.warning(f"분석기사 처리 중 예외(시도 {i}/{max_retry}): {e}")
+            logging.warning(f"⚠️ 분석기사 처리 중 예외(시도 {i}/{max_retry}): {e}")
             _accept_unexpected_alerts(driver, wait_timeout=0.8)
             try:
                 driver.save_screenshot(f"error_filter_try{i}.png")
@@ -471,6 +476,7 @@ def click_search_button(driver, wait, max_retry: int = 2):
     ]
 
     for attempt in range(1, max_retry + 1):
+        logging.info(f"🔎 검색 버튼 클릭 시도 {attempt}/{max_retry}")
         _dismiss_common_overlays(driver)
         for by, sel in selectors:
             try:
@@ -528,6 +534,7 @@ def setup_driver(download_dir: str, headless: bool) -> tuple[webdriver.Chrome, W
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
 
+    logging.info("🧩 WebDriver 초기화 (headless=%s, download_dir=%s)", headless, os.path.abspath(download_dir))
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=opts)
     wait = WebDriverWait(driver, 15)
@@ -539,6 +546,7 @@ def setup_driver(download_dir: str, headless: bool) -> tuple[webdriver.Chrome, W
 # -------------------------------
 def download_bigkinds_range(user_id: str, user_pw: str, start_date: str, end_date: str, download_dir: str, headless: bool = True) -> str:
     """지정 날짜 범위(YYYY-MM-DD ~ YYYY-MM-DD)로 BigKinds 엑셀 다운로드."""
+    logging.info("🚀 BigKinds 수집 시작: %s ~ %s", start_date, end_date)
     driver, wait = setup_driver(download_dir, headless=headless)
     try:
         # 1) 접속 + 로그인
@@ -585,7 +593,9 @@ def download_bigkinds_range(user_id: str, user_pw: str, start_date: str, end_dat
         ActionChains(driver).move_to_element(excel_btn).click().perform()
 
         # 9) 다운로드 완료
-        return wait_for_download_complete(download_dir)
+        path = wait_for_download_complete(download_dir)
+        logging.info("📥 다운로드 완료: %s", path)
+        return path
 
     finally:
         try:
@@ -598,6 +608,7 @@ def download_bigkinds_range(user_id: str, user_pw: str, start_date: str, end_dat
 # FAISS partition build/upload
 # -------------------------------
 def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings, bucket: str, s3_prefix_base: str) -> List[str]:
+    logging.info("🧱 파티션 빌드/업로드 시작 (bucket=%s, prefix=%s)", bucket, s3_prefix_base)
     s3 = boto3.client("s3")
     part_name = TARGET_PARTITION
     s3_part_prefix = f"{s3_prefix_base.rstrip('/')}/{part_name}"
@@ -624,6 +635,7 @@ def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings,
     # 컬럼 식별
     df = df.copy()
     df.columns = [str(c).strip().replace("\n", "") for c in df.columns]
+    logging.info("🗂️ 입력 데이터 컬럼: %s", df.columns.tolist())
     title_candidates = ["제목", "기사제목", "title", "Title"]
     url_candidates = ["URL", "원문URL", "url", "링크", "link", "Link"]
     tcol = next((c for c in df.columns if c in title_candidates), None)
@@ -652,6 +664,7 @@ def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings,
         docs.append(Document(page_content=title, metadata={"url": url}))
         used_urls.append(url)
 
+    logging.info("🔢 신규 문서 수: %d (기존:%d)", len(docs), len(existing))
     if db and docs:
         new_db = FAISS.from_documents(docs, embeddings)
         db.merge_from(new_db)
@@ -666,9 +679,9 @@ def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings,
     if os.path.exists(os.path.join(work_dir, "index.pkl")) and os.path.exists(os.path.join(work_dir, "index.faiss")):
         for name in ("index.pkl", "index.faiss"):
             boto3.client("s3").upload_file(os.path.join(work_dir, name), bucket, f"{s3_part_prefix}/{name}")
-        logging.info(f"업로드 완료: s3://{bucket}/{s3_part_prefix}/ (pkl→faiss)")
+        logging.info(f"✅ 업로드 완료: s3://{bucket}/{s3_part_prefix}/ (pkl→faiss)")
     else:
-        logging.warning("업로드할 인덱스 파일이 없습니다.")
+        logging.warning("⚠️ 업로드할 인덱스 파일이 없습니다.")
 
     shutil.rmtree(work_dir, ignore_errors=True)
     return used_urls
@@ -681,6 +694,7 @@ def trigger_prewarm_partition10(concurrency: int = 3, limit: int = 0, s3_prefix_
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     cmd = [os.sys.executable, "-m", "fastapitest.scripts.prewarm_articles"]
     if urls:
+        logging.info("🔥 프리워밍 모드: file (urls=%d)", len(urls))
         # Write URLs to a temp file and use file mode to avoid title preloading duplication
         tmp_dir = os.path.join(repo_root, ".tmp")
         os.makedirs(tmp_dir, exist_ok=True)
@@ -694,15 +708,16 @@ def trigger_prewarm_partition10(concurrency: int = 3, limit: int = 0, s3_prefix_
             return 1
         cmd += ["--source", "file", "--file", url_file]
     else:
+        logging.info("🔥 프리워밍 모드: partitions (prefix 기반)")
         prefix = f"{s3_prefix_base.rstrip('/')}/{TARGET_PARTITION}/"
         cmd += ["--source", "partitions", "--prefix", prefix, "--force-reload"]
     cmd += ["--concurrency", str(concurrency), "--limit", str(limit)]
-    logging.info(f"prewarm 시작: {' '.join(cmd)} (cwd={repo_root})")
+    logging.info(f"🧭 prewarm 시작: {' '.join(cmd)} (cwd={repo_root})")
     proc = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_root)
     if proc.returncode != 0:
-        logging.error(f"prewarm 실패(rc={proc.returncode})\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+        logging.error(f"❌ prewarm 실패(rc={proc.returncode})\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
     else:
-        logging.info(f"prewarm 완료\nSTDOUT:\n{proc.stdout}")
+        logging.info(f"✅ prewarm 완료\nSTDOUT:\n{proc.stdout}")
     return proc.returncode
 
 
@@ -738,15 +753,33 @@ def main():
     s3_prefix = os.environ.get("S3_INDEX_PREFIX", "feature_faiss_db_openai_partition/")
     download_dir = os.environ.get("DOWNLOAD_DIR", os.path.abspath("./downloads_test"))
     headless = os.environ.get("HEADLESS", "1") in ("1", "true", "TRUE", "yes", "YES")
+    logging.info("🧾 실행 파라미터: bucket=%s, prefix=%s, download_dir=%s, headless=%s", bucket, s3_prefix, download_dir, headless)
 
     logging.info(f"테스트 범위: {start_date} ~ {end_date} → {TARGET_PARTITION}")
 
     # 1) BigKinds 다운로드
     downloaded = download_bigkinds_range(user_id, user_pw, start_date, end_date, download_dir, headless=headless)
-    logging.info(f"다운로드 완료: {downloaded}")
+    logging.info(f"📦 다운로드 파일 경로: {downloaded}")
 
-    # 2) 빌드/업로드
+    # 2) CSV 로컬 저장(옵션, 필수 컬럼만) + 빌드/업로드
     df = pd.read_excel(downloaded)
+    df.columns = [str(c).strip().replace("\n", "") for c in df.columns]
+    logging.info("🧮 엑셀 로드 완료: rows=%d", len(df))
+    write_csv = os.environ.get("WRITE_CSV", "1") in ("1", "true", "TRUE", "yes", "YES")
+    if write_csv:
+        csv_path = os.path.splitext(downloaded)[0] + ".csv"
+        try:
+            out = pd.DataFrame()
+            for c in REQUIRED_CSV_COLUMNS:
+                if c in df.columns:
+                    out[c] = df[c]
+                else:
+                    out[c] = ""
+            out = out.fillna("")
+            out.to_csv(csv_path, index=False, encoding="utf-8-sig")
+            logging.info("📝 CSV 로컬 저장 완료(필수 컬럼): %s", csv_path)
+        except Exception as e:
+            logging.warning("CSV 저장 실패(계속 진행): %s", e)
     used_urls = build_and_upload_partition10(df, embeddings, bucket, s3_prefix)
 
     # 3) prewarm 트리거(자동 크롤링)

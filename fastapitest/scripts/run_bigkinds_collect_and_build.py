@@ -4,9 +4,11 @@ import glob
 import time
 import shutil
 import logging
+import subprocess
+import csv
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import boto3
 import pandas as pd
@@ -14,6 +16,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain.docstore.document import Document
 
+from webdriver_manager.chrome import ChromeDriverManager
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -21,6 +24,20 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.keys import Keys
+
+# Optional: build from existing Excel files (merge → DF → embed) without Selenium
+try:
+    from fastapitest.scripts.merge_excels_to_csv_and_build import (
+        collect_excel_files as _collect_excel_files,
+        merge_excels_to_csv_from_list as _merge_excels_to_csv_from_list,
+        REQUIRED_COLUMNS as _REQUIRED_COLUMNS,
+    )
+except Exception:
+    _collect_excel_files = None
+    _merge_excels_to_csv_from_list = None
+    _REQUIRED_COLUMNS = None
 
 
 def _kst_now() -> datetime:
@@ -65,13 +82,31 @@ def move_to_data_folder(src_path: str) -> str:
     return dst_path
 
 
+## CSV는 로컬 저장만 수행(요청에 따라 S3 업로드는 제거)
+
+
+def _build_df_from_local_excels(input_dir: Optional[str], files_env: Optional[str], write_csv_path: Optional[str]) -> pd.DataFrame:
+    if _collect_excel_files is None or _merge_excels_to_csv_from_list is None:
+        raise RuntimeError("merge_excels_to_csv_and_build 모듈을 불러올 수 없습니다.")
+    excel_files = _collect_excel_files(input_dir, files_env)
+    if not excel_files:
+        raise FileNotFoundError("엑셀 파일(.xlsx/.xls)을 찾을 수 없습니다. INPUT_EXCEL_FILES 또는 INPUT_EXCEL_DIR를 확인하세요.")
+    logging.info("🗂️ 병합 대상 파일 수: %d", len(excel_files))
+    for p in excel_files:
+        logging.info("   - %s", p)
+    out_csv = write_csv_path if write_csv_path else os.devnull
+    df = _merge_excels_to_csv_from_list(excel_files, out_csv, _REQUIRED_COLUMNS)
+    logging.info("🧮 병합 DataFrame 로드 완료: rows=%d", len(df))
+    return df
+
+
 def build_and_upload_month_partition(
     df: pd.DataFrame,
     embedding_model: OpenAIEmbeddings,
     bucket: str,
     s3_prefix_base: str,
     partition_month: str,
-) -> str:
+) -> Tuple[str, List[str]]:
     s3_client = boto3.client("s3")
     part_name = f"partition_{partition_month}"
     s3_part_prefix = f"{s3_prefix_base.rstrip('/')}/{part_name}"
@@ -119,6 +154,7 @@ def build_and_upload_month_partition(
                 existing_urls.add(u.strip())
 
     docs: List[Document] = []
+    used_urls: List[str] = []
     seen = set()
     for _, row in df.iterrows():
         title = str(row.get(tcol, "")).strip()
@@ -129,6 +165,7 @@ def build_and_upload_month_partition(
             continue
         seen.add(url)
         docs.append(Document(page_content=title, metadata={"url": url}))
+        used_urls.append(url)
 
     if db and docs:
         new_db = FAISS.from_documents(docs, embedding_model)
@@ -145,7 +182,7 @@ def build_and_upload_month_partition(
         s3_client.upload_file(os.path.join(work_dir, name), bucket, f"{s3_part_prefix}/{name}")
 
     shutil.rmtree(work_dir, ignore_errors=True)
-    return part_name
+    return part_name, used_urls
 
 
 def setup_driver(download_dir: str, headless: bool) -> tuple[webdriver.Chrome, WebDriverWait]:
@@ -158,14 +195,375 @@ def setup_driver(download_dir: str, headless: bool) -> tuple[webdriver.Chrome, W
         "profile.default_content_settings.popups": 0,
     }
     opts.add_experimental_option("prefs", prefs)
+    # Reduce noisy logs and headless quirks
+    opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+    opts.add_argument("--log-level=3")
+    opts.add_argument("--window-size=1400,900")
+    opts.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
     if headless:
         opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
-    driver = webdriver.Chrome(service=Service(), options=opts)
-    driver.maximize_window()
+    opts.add_argument("--disable-gpu")
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=opts)
     wait = WebDriverWait(driver, 15)
     return driver, wait
+
+# -------------------------------
+# Selenium helpers (robust)
+# -------------------------------
+def _accept_unexpected_alerts(driver, wait_timeout: float = 1.0) -> Optional[str]:
+    try:
+        WebDriverWait(driver, wait_timeout).until(EC.alert_is_present())
+        al = driver.switch_to.alert
+        txt = al.text
+        al.accept()
+        return txt
+    except TimeoutException:
+        return None
+
+
+def _scroll_into_view(driver, el):
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center', inline:'center'});", el)
+    except Exception:
+        pass
+
+
+def _open_step_panel(driver, panel_id: str):
+    try:
+        btn = driver.find_element(By.ID, panel_id)
+        expanded = (btn.get_attribute("aria-expanded") or "").lower()
+        if expanded in ("", "false"):
+            driver.execute_script("arguments[0].click();", btn)
+            time.sleep(0.3)
+    except Exception:
+        pass
+
+
+def _open_tab(driver, css_selector: str):
+    try:
+        tab = WebDriverWait(driver, 7).until(EC.element_to_be_clickable((By.CSS_SELECTOR, css_selector)))
+        driver.execute_script("arguments[0].click();", tab)
+        time.sleep(0.2)
+    except Exception:
+        pass
+
+
+def select_national_dailies(driver, wait):
+    _open_tab(driver, "a[href='#srch-tab2']")
+    time.sleep(0.5)
+    try:
+        b = driver.find_element(By.ID, "방송사")
+        _scroll_into_view(driver, b)
+        b.click()
+        time.sleep(0.2)
+    except Exception:
+        pass
+    try:
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, '전국일간지')))
+        driver.execute_script("document.getElementById('전국일간지').click();")
+        time.sleep(0.2)
+        return
+    except Exception:
+        pass
+    try:
+        lbl = driver.find_element(By.CSS_SELECTOR, "label[for='전국일간지']")
+        _scroll_into_view(driver, lbl)
+        driver.execute_script("arguments[0].click();", lbl)
+        time.sleep(0.2)
+        return
+    except Exception:
+        pass
+    try:
+        node = driver.find_element(By.XPATH, "//*[contains(normalize-space(.), '전국일간지')]")
+        _scroll_into_view(driver, node)
+        driver.execute_script("arguments[0].click();", node)
+        time.sleep(0.2)
+    except Exception:
+        logging.warning("전국일간지 선택에 실패했습니다. 계속 진행합니다.")
+
+
+def choose_politics_category(driver, wait):
+    _open_tab(driver, "a[href='#srch-tab3']")
+    time.sleep(0.3)
+    try:
+        node = wait.until(EC.element_to_be_clickable((By.XPATH, '//span[@data-role="display" and text()="정치"]')))
+        _scroll_into_view(driver, node)
+        node.click()
+        time.sleep(0.2)
+    except Exception:
+        logging.warning("통합분류 '정치' 선택 실패. 계속 진행합니다.")
+
+
+def _ensure_date_direct_input_mode(driver) -> None:
+    js = r'''
+    return (function(){
+      function clickNode(n){ try{ n.scrollIntoView({block:'center'}); n.click(); return true; }catch(e){ return false; } }
+      const labels = ['직접입력','사용자 지정','수동입력','수동','직접'];
+      for (const t of labels){
+        const nodes = Array.from(document.querySelectorAll('label,button,a,span,div'));
+        for (const n of nodes){
+          const s = (n.innerText||'').replace(/\s+/g,' ').trim();
+          if (s && s.includes(t)) { if (clickNode(n)) return 'text'; }
+        }
+      }
+      const radios = Array.from(document.querySelectorAll('input[type=radio],input[type=button]'));
+      for (const r of radios){
+        const s = ((r.id||'')+' '+(r.value||'')+' '+(r.name||'')).toLowerCase();
+        if (/(direct|manual|custom|user|free)/.test(s)){
+          if (clickNode(r)) return 'radio';
+        }
+      }
+      return '';
+    })();
+    '''
+    try:
+        mode = driver.execute_script(js)
+        if mode:
+            time.sleep(0.2)
+    except Exception:
+        pass
+
+
+def set_date_range_with_events(driver, start_str: str, end_str: str):
+    js = r'''
+    (function(){
+      function setAndDispatch(id, val){
+        var el = document.getElementById(id);
+        if(!el){return;}
+        try { el.removeAttribute('readonly'); } catch(_){ }
+        el.value = val;
+        if (window.jQuery){
+          try { window.jQuery(el).val(val).trigger('input').trigger('change'); } catch(_){ }
+        }
+        el.dispatchEvent(new Event('input', {bubbles:true}));
+        el.dispatchEvent(new Event('change', {bubbles:true}));
+      }
+      setAndDispatch('search-begin-date', arguments[0]);
+      setAndDispatch('search-end-date', arguments[1]);
+    })();
+    '''
+    driver.execute_script(js, start_str, end_str)
+
+
+def set_date_range_robust(driver, start_str: str, end_str: str, retries: int = 3) -> None:
+    def norm(d: str) -> str:
+        m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", d)
+        if not m: return d
+        y, mo, da = m.groups()
+        return f"{y}-{int(mo):02d}-{int(da):02d}"
+
+    start_str = norm(start_str)
+    end_str = norm(end_str)
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", start_str) or not re.match(r"^\d{4}-\d{2}-\d{2}$", end_str):
+        raise ValueError(f"날짜 형식은 YYYY-MM-DD 이어야 합니다. start={start_str}, end={end_str}")
+
+    _open_tab(driver, "a[href='#srch-tab1']")
+    _open_step_panel(driver, "collapse-step-1")
+    _ensure_date_direct_input_mode(driver)
+
+    for attempt in range(1, retries + 1):
+        try:
+            js = r'''
+            (function(s,e){
+              function setVal(id, val){
+                var el = document.getElementById(id);
+                if(!el) return false;
+                try { el.removeAttribute('readonly'); } catch(_){ }
+                el.value = val;
+                if (window.jQuery){
+                  try { window.jQuery(el).val(val).trigger('input').trigger('change'); } catch(_){ }
+                }
+                el.dispatchEvent(new Event('input', {bubbles:true}));
+                el.dispatchEvent(new Event('change', {bubbles:true}));
+                return true;
+              }
+              var ok1 = setVal('search-begin-date', s);
+              var ok2 = setVal('search-end-date', e);
+              document.activeElement && document.activeElement.blur && document.activeElement.blur();
+              document.body && document.body.click && document.body.click();
+              return ok1 && ok2;
+            })(arguments[0], arguments[1]);
+            '''
+            driver.execute_script(js, start_str, end_str)
+        except Exception:
+            pass
+
+        time.sleep(0.5)
+        _accept_unexpected_alerts(driver, wait_timeout=0.7)
+
+        begin_val, end_val = driver.execute_script(
+            "return [document.getElementById('search-begin-date')?.value, document.getElementById('search-end-date')?.value];"
+        )
+        if begin_val == start_str and end_val == end_str:
+            return
+
+        try:
+            b = driver.find_element(By.ID, 'search-begin-date')
+            e = driver.find_element(By.ID, 'search-end-date')
+            for el, val in ((b, start_str), (e, end_str)):
+                driver.execute_script("arguments[0].removeAttribute('readonly');", el)
+                _scroll_into_view(driver, el)
+                el.click(); time.sleep(0.05)
+                el.send_keys(Keys.CONTROL, 'a'); time.sleep(0.05)
+                el.send_keys(val); time.sleep(0.05)
+                el.send_keys(Keys.TAB)
+            time.sleep(0.5)
+            _accept_unexpected_alerts(driver, wait_timeout=0.7)
+            begin_val, end_val = driver.execute_script(
+                "return [document.getElementById('search-begin-date')?.value, document.getElementById('search-end-date')?.value];"
+            )
+            if begin_val == start_str and end_val == end_str:
+                return
+        except Exception:
+            pass
+
+        logging.info(f"날짜 재시도 필요(시도 {attempt}/{retries}): begin={begin_val}, end={end_val}")
+        time.sleep(0.4)
+
+    set_date_range_with_events(driver, start_str, end_str)
+    time.sleep(0.4)
+    _accept_unexpected_alerts(driver, wait_timeout=0.7)
+
+
+def _dismiss_common_overlays(driver):
+    try:
+        texts = ["확인", "동의", "동의합니다", "닫기", "오늘 그만 보기", "X", "닫  기"]
+        candidates = driver.find_elements(
+            By.XPATH,
+            "//*[contains(@class,'modal') or contains(@class,'layer') or contains(@class,'popup') or contains(@class,'overlay') or contains(@class,'dim')]//button|//a"
+        )
+        for btn in candidates:
+            label = (btn.text or "").strip()
+            if any(t in label for t in texts):
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                    driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def click_search_button(driver, wait):
+    _dismiss_common_overlays(driver)
+    selectors = [
+        (By.CSS_SELECTOR, "button.news-report-search-btn"),
+        (By.CSS_SELECTOR, "button.news-search-btn"),
+        (By.CSS_SELECTOR, "button.btn-search"),
+        (By.XPATH, "//button[contains(normalize-space(.),'검색하기')]"),
+        (By.XPATH, "//a[contains(normalize-space(.),'검색하기')]"),
+        (By.XPATH, "//button[contains(.,'검색')]")
+    ]
+    for by, sel in selectors:
+        try:
+            el = wait.until(EC.presence_of_element_located((by, sel)))
+            _scroll_into_view(driver, el)
+            try:
+                el = wait.until(EC.element_to_be_clickable((by, sel)))
+                ActionChains(driver).move_to_element(el).pause(0.05).click().perform()
+            except Exception:
+                driver.execute_script("arguments[0].click();", el)
+            time.sleep(0.3)
+            return True
+        except Exception:
+            continue
+    try:
+        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ENTER)
+        time.sleep(0.3)
+        return True
+    except Exception:
+        pass
+    raise TimeoutException("검색 버튼 클릭 실패")
+
+
+def apply_analysis_article_filter(driver, wait, max_retry: int = 3) -> bool:
+    _open_step_panel(driver, "collapse-step-2")
+    for i in range(1, max_retry + 1):
+        try:
+            cb = WebDriverWait(driver, 7).until(EC.presence_of_element_located((By.ID, "filter-tm-use")))
+            _scroll_into_view(driver, cb)
+            try:
+                label = driver.find_element(By.CSS_SELECTOR, "label[for='filter-tm-use']")
+                _scroll_into_view(driver, label)
+                driver.execute_script("arguments[0].click();", label)
+                time.sleep(0.2)
+            except Exception:
+                pass
+            is_checked = driver.execute_script("return !!document.getElementById('filter-tm-use')?.checked;")
+            if not is_checked:
+                js_force = r'''
+                (function(){
+                  var el = document.getElementById('filter-tm-use');
+                  if(!el) return false;
+                  el.checked = true;
+                  el.dispatchEvent(new Event('click', {bubbles:true}));
+                  el.dispatchEvent(new Event('input', {bubbles:true}));
+                  el.dispatchEvent(new Event('change', {bubbles:true}));
+                  return el.checked === true;
+                })();
+                '''
+                is_checked = driver.execute_script(js_force)
+                time.sleep(0.2)
+            if not is_checked:
+                try:
+                    _scroll_into_view(driver, cb)
+                    cb.click()
+                    time.sleep(0.2)
+                    is_checked = driver.execute_script("return !!document.getElementById('filter-tm-use')?.checked;")
+                except Exception:
+                    pass
+            if not is_checked:
+                logging.warning(f"분석기사 체크 실패(시도 {i}/{max_retry}) - 재시도")
+                _accept_unexpected_alerts(driver, wait_timeout=0.5)
+                continue
+            # 적용하기 버튼
+            apply_candidates = [
+                (By.XPATH, "//button[contains(normalize-space(.), '적용하기')]"),
+                (By.XPATH, "//a[contains(normalize-space(.), '적용하기')]"),
+                (By.CSS_SELECTOR, "button.btn-apply"),
+                (By.CSS_SELECTOR, "button.apply"),
+                (By.CSS_SELECTOR, "button.filter-apply"),
+            ]
+            applied = False
+            for by, sel in apply_candidates:
+                try:
+                    btn = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((by, sel)))
+                    _scroll_into_view(driver, btn)
+                    driver.execute_script("arguments[0].click();", btn)
+                    applied = True
+                    break
+                except Exception:
+                    continue
+            if not applied:
+                try:
+                    btn = driver.find_element(By.XPATH, "//button[contains(., '적용하기') or contains(., '적용')]")
+                    _scroll_into_view(driver, btn)
+                    driver.execute_script("arguments[0].click();", btn)
+                    applied = True
+                except Exception:
+                    pass
+            if not applied:
+                logging.warning(f"적용하기 버튼 클릭 실패(시도 {i}/{max_retry})")
+                _accept_unexpected_alerts(driver, wait_timeout=0.5)
+                continue
+            _accept_unexpected_alerts(driver, wait_timeout=1.0)
+            time.sleep(1.2)
+            still_checked = driver.execute_script("return !!document.getElementById('filter-tm-use')?.checked;")
+            logging.info("✅ 분석기사 체크 및 적용하기 완료 (checked=%s)", still_checked)
+            return True
+        except Exception as e:
+            logging.warning(f"분석기사 처리 중 예외(시도 {i}/{max_retry}): {e}")
+            _accept_unexpected_alerts(driver, wait_timeout=0.8)
+            try:
+                driver.save_screenshot(f"error_filter_try{i}.png")
+            except Exception:
+                pass
+            time.sleep(0.6)
+    return False
 
 
 def bigkinds_login_and_download(
@@ -193,38 +591,29 @@ def bigkinds_login_and_download(
         driver.get("https://www.bigkinds.or.kr/v2/news/index.do")
         time.sleep(2)
 
-        # 언론사: 전국일간지 (doc.querySelector 없이 WebDriver 사용)
-        tab2 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab2']")))
-        tab2.click()
-        time.sleep(0.5)
-        wait.until(EC.element_to_be_clickable((By.ID, '전국일간지'))).click()
-        time.sleep(0.5)
+        # 언론사/정치
+        logging.info("📰 언론사: 전국일간지 선택 시도")
+        select_national_dailies(driver, wait)
+        logging.info("🏷️ 통합분류: 정치 선택 시도")
+        choose_politics_category(driver, wait)
 
-        # 통합분류: 정치 (WebDriver 사용)
-        tab3 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab3']")))
-        tab3.click()
-        time.sleep(0.5)
-        wait.until(EC.element_to_be_clickable((By.XPATH, '//span[@data-role="display" and text()="정치"]'))).click()
-        time.sleep(0.5)
-
-        # 기간: 1일 (WebDriver 사용)
-        tab1 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab1']")))
-        tab1.click()
-        time.sleep(0.3)
-        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'label[for="date1-7"]'))).click()
-        time.sleep(0.5)
+        # 기간: 당일(KST) 1일 범위 직접 입력
+        kst_today = _kst_now().strftime("%Y-%m-%d")
+        logging.info(f"📅 기간 설정: {kst_today} ~ {kst_today}")
+        set_date_range_robust(driver, kst_today, kst_today)
+        time.sleep(0.4)
 
         # 검색 적용
-        search_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button.btn.btn-search.news-search-btn.news-report-search-btn')))
-        ActionChains(driver).move_to_element(search_btn).click().perform()
-        time.sleep(3)
-
-        # 분석기사 체크
-        label_tm_use = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'label[for="filter-tm-use"]')))
-        driver.execute_script("arguments[0].click();", label_tm_use)
+        logging.info("🔎 검색 적용 클릭")
+        click_search_button(driver, wait)
         time.sleep(2)
 
+        # 분석기사 체크 → 적용하기
+        logging.info("🧩 분석기사 체크/적용")
+        apply_analysis_article_filter(driver, wait, max_retry=3)
+
         # 다운로드
+        logging.info("⬇️ 엑셀 다운로드 열기")
         step3_btn = wait.until(EC.element_to_be_clickable((By.ID, "collapse-step-3")))
         driver.execute_script("arguments[0].click();", step3_btn)
         time.sleep(0.5)
@@ -238,6 +627,26 @@ def bigkinds_login_and_download(
             driver.quit()
         except Exception:
             pass
+
+
+def _trigger_prewarm_after_upload(urls: List[str], concurrency: int = 3, limit: int = 0) -> int:
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    cmd = [os.sys.executable, "-m", "fastapitest.scripts.prewarm_articles"]
+    # 파일 모드로 URL 전달(제목 프리로드 중복 방지)
+    tmp_dir = os.path.join(repo_root, ".tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    url_file = os.path.join(tmp_dir, f"urls_partition_daily.txt")
+    with open(url_file, "w", encoding="utf-8") as f:
+        for u in urls:
+            f.write(u.strip() + "\n")
+    cmd += ["--source", "file", "--file", url_file, "--concurrency", str(concurrency), "--limit", str(limit)]
+    logging.info(f"prewarm 시작: {' '.join(cmd)} (cwd={repo_root})")
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_root)
+    if proc.returncode != 0:
+        logging.error(f"prewarm 실패(rc={proc.returncode})\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+    else:
+        logging.info(f"prewarm 완료\nSTDOUT:\n{proc.stdout}")
+    return proc.returncode
 
 
 def main():
@@ -257,22 +666,51 @@ def main():
     s3_prefix = os.environ.get("S3_INDEX_PREFIX", "feature_faiss_db_openai_partition/")
     download_dir = os.environ.get("DOWNLOAD_DIR", os.path.abspath("./downloads"))
     headless = os.environ.get("HEADLESS", "1") in ("1", "true", "TRUE", "yes", "YES")
+    # CSV 파이프라인 옵션 (로컬 저장만; S3 업로드는 비활성)
+    write_csv = os.environ.get("WRITE_CSV", "1") in ("1", "true", "TRUE", "yes", "YES")
+    logging.info("🧾 실행 파라미터: bucket=%s, prefix=%s, headless=%s", bucket, s3_prefix, headless)
 
     # 파티션 방식: 기본은 당월(서울시간)
     partition_month = os.environ.get("PARTITION_MONTH") or compute_partition_month_kst()
 
-    # 1) 수집: BigKinds에서 1일 데이터 엑셀 다운로드
-    logging.info("📥 BigKinds 다운로드 시작 (1일)")
+    # 1) 1일 수집: BigKinds 엑셀 다운로드 → CSV(선택) → DF 로드
+    logging.info("📥 BigKinds 다운로드 시작 (1일, KST)")
     downloaded = bigkinds_login_and_download(user_id, user_pw, download_dir, headless=headless)
     moved = move_to_data_folder(downloaded)
     logging.info(f"📦 다운로드 파일 정리: {moved}")
-
-    # 2) 빌드/업로드: 타이틀 인덱스 증분 병합 → S3 pkl→faiss 업로드
-    logging.info("🧱 타이틀 인덱스 병합/업로드 시작")
+    # 엑셀 로드 및 정규화
     df = pd.read_excel(moved)
+    df.columns = [str(c).strip().replace("\n", "") for c in df.columns]
+    # CSV 저장(필수 컬럼만)
+    if write_csv:
+        csv_path = os.path.splitext(moved)[0] + ".csv"
+        try:
+            required_cols = ["일자", "언론사", "제목", "URL", "특성추출(가중치순 상위 50개)"]
+            out = pd.DataFrame()
+            for c in required_cols:
+                if c in df.columns:
+                    out[c] = df[c]
+                else:
+                    out[c] = ""
+            out = out.fillna("")
+            out.to_csv(csv_path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+            logging.info(f"📝 CSV 로컬 저장 완료(필수 컬럼): {csv_path}")
+        except Exception as e:
+            logging.warning(f"CSV 저장 실패(계속 진행): {e}")
+    logging.info("🧱 타이틀 인덱스 병합/업로드 시작")
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=openai_api_key)
-    part_name = build_and_upload_month_partition(df, embeddings, bucket, s3_prefix, partition_month)
+    part_name, used_urls = build_and_upload_month_partition(df, embeddings, bucket, s3_prefix, partition_month)
     logging.info(f"✅ 업로드 완료: s3://{bucket}/{s3_prefix}{part_name}/ (pkl→faiss)")
+
+    # 3) (옵션) 업로드 직후 본문 프리워밍: 파일 모드로 새 URL만 처리
+    prewarm_enabled = os.environ.get("PREWARM_AFTER_UPLOAD", "1") in ("1", "true", "TRUE", "yes", "YES")
+    if prewarm_enabled:
+        logging.info(f"🔥 본문 프리워밍 시작 (urls={len(used_urls)})")
+        _trigger_prewarm_after_upload(
+            urls=used_urls,
+            concurrency=int(os.environ.get("PREWARM_CONCURRENCY", "3")),
+            limit=int(os.environ.get("PREWARM_LIMIT", "0")),
+        )
 
 
 if __name__ == "__main__":
