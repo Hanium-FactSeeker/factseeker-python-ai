@@ -193,31 +193,29 @@ def bigkinds_login_and_download(
         driver.get("https://www.bigkinds.or.kr/v2/news/index.do")
         time.sleep(2)
 
-        # 언론사: 전국일간지
+        # 언론사: 전국일간지 (doc.querySelector 없이 WebDriver 사용)
         tab2 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab2']")))
         tab2.click()
         time.sleep(0.5)
-        driver.execute_script("document.getElementById('전국일간지').click();")
+        wait.until(EC.element_to_be_clickable((By.ID, '전국일간지'))).click()
         time.sleep(0.5)
 
-        # 통합분류: 정치
+        # 통합분류: 정치 (WebDriver 사용)
         tab3 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab3']")))
         tab3.click()
         time.sleep(0.5)
         wait.until(EC.element_to_be_clickable((By.XPATH, '//span[@data-role="display" and text()="정치"]'))).click()
         time.sleep(0.5)
 
-        # 기간: 1일
+        # 기간: 1일 (WebDriver 사용)
         tab1 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab1']")))
         tab1.click()
         time.sleep(0.3)
-        one_day_label = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'label[for="date1-7"]')))
-        driver.execute_script("arguments[0].click();", one_day_label)
+        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'label[for="date1-7"]'))).click()
         time.sleep(0.5)
 
         # 검색 적용
         search_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button.btn.btn-search.news-search-btn.news-report-search-btn')))
-        driver.execute_script("arguments[0].scrollIntoView(true);", search_btn)
         ActionChains(driver).move_to_element(search_btn).click().perform()
         time.sleep(3)
 

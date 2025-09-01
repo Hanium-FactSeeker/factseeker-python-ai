@@ -21,6 +21,8 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.common.keys import Keys
 
 
 TARGET_PARTITION = "partition_10"
@@ -67,6 +69,213 @@ def wait_for_download_complete(download_dir: str, timeout_sec: int = 600) -> str
     raise TimeoutError("다운로드 완료 대기 시간 초과")
 
 
+def _accept_unexpected_alerts(driver, wait_timeout: float = 1.0) -> str | None:
+    try:
+        WebDriverWait(driver, wait_timeout).until(EC.alert_is_present())
+        al = driver.switch_to.alert
+        txt = al.text
+        al.accept()
+        return txt
+    except TimeoutException:
+        return None
+
+
+def _ensure_date_direct_input_mode(driver) -> None:
+    """Switch the '기간' control into a direct/manual/custom input mode."""
+    js = r"""
+    return (function(){
+      function clickAny(selector, texts){
+        var nodes = Array.from(document.querySelectorAll(selector));
+        for (var n of nodes){
+          var t = ((n.innerText||n.textContent||'')+' '+(n.value||'')+' '+(n.getAttribute('aria-label')||''))
+                    .replace(/\s+/g,' ').trim().toLowerCase();
+          for (var i=0;i<texts.length;i++){
+            if (t && t.indexOf(texts[i]) !== -1){
+              try{ n.click(); return true; }catch(e){}
+            }
+          }
+        }
+        return false;
+      }
+      var texts = ['직접입력','직접 입력','사용자지정','사용자 지정','수동입력','수동 입력'];
+      if (clickAny('label,button,a,span,div,input', texts)) return true;
+      var ctrls = Array.from(document.querySelectorAll('input[type=radio],input[type=button],button'));
+      for (var r of ctrls){
+        var s = ((r.id||'')+':' + (r.value||'')+':' + (r.name||'')).toLowerCase();
+        if(/direct|manual|custom/.test(s)){
+          try{ r.click(); return true; }catch(e){}
+        }
+      }
+      return false;
+    })();
+    """
+    try:
+        ok = driver.execute_script(js)
+        if ok:
+            time.sleep(0.2)
+    except Exception:
+        pass
+
+
+def _expand_date_section(driver) -> None:
+    try:
+        btn = driver.find_element(By.ID, "collapse-step-1")
+        driver.execute_script("arguments[0].click();", btn)
+        time.sleep(0.4)
+    except Exception:
+        pass
+
+
+def set_date_range_with_events(driver, start_str: str, end_str: str):
+    js = r"""
+    (function(beg, end){
+      function setAndDispatch(id, val){
+        var el = document.getElementById(id);
+        if(!el){return;}
+        el.value = val;
+        try { el.dispatchEvent(new Event('input', {bubbles:true})); } catch(e){}
+        try { el.dispatchEvent(new Event('change', {bubbles:true})); } catch(e){}
+        try { if (window.$) { window.$('#'+id).val(val).trigger('input').trigger('change'); } } catch(e) {}
+      }
+      setAndDispatch('search-begin-date', beg);
+      setAndDispatch('search-end-date', end);
+    })(arguments[0], arguments[1]);
+    """
+    driver.execute_script(js, start_str, end_str)
+
+
+def set_date_range_robust(driver, start_str: str, end_str: str, retries: int = 3) -> None:
+    def norm(d: str) -> str:
+        m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", d)
+        if not m:
+            return d
+        y, mo, da = m.groups()
+        return f"{y}-{int(mo):02d}-{int(da):02d}"
+
+    start_str = norm(start_str)
+    end_str = norm(end_str)
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", start_str) or not re.match(r"^\d{4}-\d{2}-\d{2}$", end_str):
+        raise ValueError(f"YYYY-MM-DD 형식 필요: start={start_str}, end={end_str}")
+
+    for attempt in range(1, retries + 1):
+        _ensure_date_direct_input_mode(driver)
+
+        # A) JS inject + events (including jQuery)
+        set_date_range_with_events(driver, start_str, end_str)
+        try:
+            driver.execute_script("document.activeElement && document.activeElement.blur();")
+            driver.execute_script("document.body && document.body.click && document.body.click();")
+        except Exception:
+            pass
+
+        time.sleep(0.4)
+        alert_text = _accept_unexpected_alerts(driver, wait_timeout=1.0)
+        if alert_text:
+            logging.warning(f"날짜 입력 경고(시도 {attempt}/{retries}): {alert_text}")
+            time.sleep(0.2)
+            continue
+
+        begin_val, end_val = driver.execute_script(
+            "return [document.getElementById('search-begin-date')?.value, document.getElementById('search-end-date')?.value];"
+        )
+        if begin_val == start_str and end_val == end_str:
+            return
+
+        # B) Direct typing fallback
+        try:
+            b = driver.find_element(By.ID, 'search-begin-date')
+            e = driver.find_element(By.ID, 'search-end-date')
+            for el, val in ((b, start_str), (e, end_str)):
+                el.click(); time.sleep(0.05)
+                el.send_keys(Keys.CONTROL, 'a'); time.sleep(0.05)
+                el.send_keys(val); time.sleep(0.05)
+                el.send_keys(Keys.TAB)
+            time.sleep(0.4)
+            alert_text = _accept_unexpected_alerts(driver, wait_timeout=1.0)
+            if alert_text:
+                logging.warning(f"날짜 입력 경고(키입력 후, 시도 {attempt}/{retries}): {alert_text}")
+                time.sleep(0.2)
+                continue
+            begin_val, end_val = driver.execute_script(
+                "return [document.getElementById('search-begin-date')?.value, document.getElementById('search-end-date')?.value];"
+            )
+            if begin_val == start_str and end_val == end_str:
+                return
+        except Exception:
+            pass
+
+    # Last attempt
+    set_date_range_with_events(driver, start_str, end_str)
+    time.sleep(0.4)
+    _accept_unexpected_alerts(driver, wait_timeout=1.0)
+
+
+def set_tm_use_filter(driver, wait: WebDriverWait, enabled: bool = True, retries: int = 3) -> bool:
+    """Ensure the '분석기사' checkbox (id=filter-tm-use) is in the desired state.
+
+    - Prefers clicking the corresponding label for robustness.
+    - Accepts unexpected alerts between attempts.
+    - Verifies via the element's checked property.
+    """
+    def current_state():
+        try:
+            return driver.execute_script("var e=document.getElementById('filter-tm-use'); return e?e.checked:null;")
+        except Exception:
+            return None
+
+    for attempt in range(1, retries + 1):
+        _accept_unexpected_alerts(driver, wait_timeout=0.5)
+        try:
+            # Wait for either the input or its label to be present/clickable
+            try:
+                label = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "label[for='filter-tm-use']"))
+                )
+            except Exception:
+                label = None
+
+            try:
+                checkbox = driver.find_element(By.ID, "filter-tm-use")
+            except Exception:
+                checkbox = None
+
+            st = current_state()
+            if st is not None and st == enabled:
+                return True
+
+            # Try clicking the label first (more reliable on many UIs)
+            clicked = False
+            if label is not None:
+                try:
+                    driver.execute_script("arguments[0].click();", label)
+                    clicked = True
+                except Exception:
+                    pass
+
+            # Fallback: click the checkbox directly
+            if not clicked and checkbox is not None:
+                try:
+                    driver.execute_script("arguments[0].click();", checkbox)
+                    clicked = True
+                except Exception:
+                    try:
+                        checkbox.click()
+                        clicked = True
+                    except Exception:
+                        pass
+
+            time.sleep(0.3)
+            _accept_unexpected_alerts(driver, wait_timeout=0.8)
+
+            st = current_state()
+            if st is not None and st == enabled:
+                return True
+        except Exception:
+            pass
+
+        logging.info(f"분석기사 체크 재시도({attempt}/{retries})")
+        time.sleep(0.3)
+    return False
 def download_bigkinds_range(user_id: str, user_pw: str, start_date: str, end_date: str, download_dir: str, headless: bool = True) -> str:
     """지정 날짜 범위(YYYY-MM-DD ~ YYYY-MM-DD)로 BigKinds 엑셀 다운로드.
     기존 로직을 참고해 로그인 → 언론사/정치 → 날짜 직접 입력 → 분석기사 체크 → 엑셀 다운로드.
@@ -88,29 +297,28 @@ def download_bigkinds_range(user_id: str, user_pw: str, start_date: str, end_dat
         driver.get("https://www.bigkinds.or.kr/v2/news/index.do")
         time.sleep(2)
 
-        # 언론사: 전국일간지
+        # 언론사: 전국일간지 (WebDriver 사용)
         tab2 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab2']")))
         tab2.click()
         time.sleep(0.5)
-        driver.execute_script("document.getElementById('전국일간지').click();")
+        wait.until(EC.element_to_be_clickable((By.ID, '전국일간지'))).click()
         time.sleep(0.5)
 
-        # 통합분류: 정치
+        # 통합분류: 정치 (WebDriver 사용)
         tab3 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab3']")))
         tab3.click()
         time.sleep(0.5)
         wait.until(EC.element_to_be_clickable((By.XPATH, '//span[@data-role="display" and text()="정치"]'))).click()
         time.sleep(0.5)
 
-        # 기간: 직접 날짜 입력
+        # 기간: 직접 날짜 입력 (강화된 처리)
         tab1 = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#srch-tab1']")))
         tab1.click()
         time.sleep(0.3)
-        driver.execute_script(f"document.getElementById('search-begin-date').value = '{start_date}';")
-        driver.execute_script(f"document.getElementById('search-end-date').value = '{end_date}';")
-        driver.execute_script("$('#search-begin-date').trigger('change');")
-        driver.execute_script("$('#search-end-date').trigger('change');")
-        time.sleep(1)
+        _expand_date_section(driver)
+        _ensure_date_direct_input_mode(driver)
+        set_date_range_robust(driver, start_date, end_date)
+        time.sleep(0.5)
 
         # 검색 적용
         search_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button.btn.btn-search.news-search-btn.news-report-search-btn')))
@@ -118,9 +326,10 @@ def download_bigkinds_range(user_id: str, user_pw: str, start_date: str, end_dat
         ActionChains(driver).move_to_element(search_btn).click().perform()
         time.sleep(3)
 
-        # 분석기사 체크
-        label_tm_use = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'label[for="filter-tm-use"]')))
-        driver.execute_script("arguments[0].click();", label_tm_use)
+        # 분석기사 체크: 라벨 우선 클릭 + 상태 검증 + 알럿 처리
+        ok_tm = set_tm_use_filter(driver, wait, enabled=True, retries=3)
+        if not ok_tm:
+            logging.warning("분석기사 체크를 보장하지 못했습니다. 계속 진행합니다.")
         time.sleep(2)
 
         # 다운로드
