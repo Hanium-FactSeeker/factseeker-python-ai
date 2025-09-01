@@ -107,7 +107,8 @@ async def _watch_titles_preload_task(base_prefix: str, poll_interval_sec: float 
                 if seen.get(prefix) != tag:
                     logging.info(f"🔔 S3 변경 감지: {faiss_key} → 제목 프리로드 재실행")
                     _remove_local_partition(prefix)
-                    preload_faiss_from_existing_s3(prefix)
+                    # 강제 재다운로드를 통해 로컬 캐시가 남아 있어도 최신으로 교체
+                    preload_faiss_from_existing_s3(prefix, force_reload=True)
                     _refresh_faiss_partition_dirs()
                     seen[prefix] = tag
         except Exception as e:

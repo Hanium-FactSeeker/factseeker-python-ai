@@ -597,7 +597,7 @@ def download_bigkinds_range(user_id: str, user_pw: str, start_date: str, end_dat
 # -------------------------------
 # FAISS partition build/upload
 # -------------------------------
-def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings, bucket: str, s3_prefix_base: str) -> None:
+def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings, bucket: str, s3_prefix_base: str) -> List[str]:
     s3 = boto3.client("s3")
     part_name = TARGET_PARTITION
     s3_part_prefix = f"{s3_prefix_base.rstrip('/')}/{part_name}"
@@ -639,6 +639,7 @@ def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings,
                 existing.add(u.strip())
 
     docs: List[Document] = []
+    used_urls: List[str] = []
     seen = set()
     for _, row in df.iterrows():
         title = str(row.get(tcol, "")).strip()
@@ -649,6 +650,7 @@ def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings,
             continue
         seen.add(url)
         docs.append(Document(page_content=title, metadata={"url": url}))
+        used_urls.append(url)
 
     if db and docs:
         new_db = FAISS.from_documents(docs, embeddings)
@@ -669,28 +671,32 @@ def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings,
         logging.warning("업로드할 인덱스 파일이 없습니다.")
 
     shutil.rmtree(work_dir, ignore_errors=True)
+    return used_urls
 
 
 # -------------------------------
 # Prewarm trigger
 # -------------------------------
-def trigger_prewarm_partition10(concurrency: int = 3, limit: int = 0, s3_prefix_base: str = "feature_faiss_db_openai_partition/") -> int:
-    prefix = f"{s3_prefix_base.rstrip('/')}/{TARGET_PARTITION}/"
-    cmd = [
-        os.sys.executable,
-        "-m",
-        "fastapitest.scripts.prewarm_articles",
-        "--source",
-        "partitions",
-        "--prefix",
-        prefix,
-        "--force-reload",
-        "--concurrency",
-        str(concurrency),
-        "--limit",
-        str(limit),
-    ]
+def trigger_prewarm_partition10(concurrency: int = 3, limit: int = 0, s3_prefix_base: str = "feature_faiss_db_openai_partition/", urls: Optional[List[str]] = None) -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    cmd = [os.sys.executable, "-m", "fastapitest.scripts.prewarm_articles"]
+    if urls:
+        # Write URLs to a temp file and use file mode to avoid title preloading duplication
+        tmp_dir = os.path.join(repo_root, ".tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        url_file = os.path.join(tmp_dir, f"urls_{TARGET_PARTITION}.txt")
+        try:
+            with open(url_file, "w", encoding="utf-8") as f:
+                for u in urls:
+                    f.write(u.strip() + "\n")
+        except Exception as e:
+            logging.error(f"URL 파일 생성 실패: {e}")
+            return 1
+        cmd += ["--source", "file", "--file", url_file]
+    else:
+        prefix = f"{s3_prefix_base.rstrip('/')}/{TARGET_PARTITION}/"
+        cmd += ["--source", "partitions", "--prefix", prefix, "--force-reload"]
+    cmd += ["--concurrency", str(concurrency), "--limit", str(limit)]
     logging.info(f"prewarm 시작: {' '.join(cmd)} (cwd={repo_root})")
     proc = subprocess.run(cmd, capture_output=True, text=True, cwd=repo_root)
     if proc.returncode != 0:
@@ -741,13 +747,14 @@ def main():
 
     # 2) 빌드/업로드
     df = pd.read_excel(downloaded)
-    build_and_upload_partition10(df, embeddings, bucket, s3_prefix)
+    used_urls = build_and_upload_partition10(df, embeddings, bucket, s3_prefix)
 
     # 3) prewarm 트리거(자동 크롤링)
     rc = trigger_prewarm_partition10(
         concurrency=int(os.environ.get("PREWARM_CONCURRENCY", "3")),
         limit=int(os.environ.get("PREWARM_LIMIT", "0")),
         s3_prefix_base=s3_prefix,
+        urls=used_urls,
     )
     if rc != 0:
         raise SystemExit(rc)

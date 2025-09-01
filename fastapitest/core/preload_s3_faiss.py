@@ -38,7 +38,7 @@ def _list_faiss_keys_from_s3(s3_prefix):
 
 # 온디맨드 파티션 조회 기능은 롤백
 
-def preload_faiss_from_existing_s3(s3_prefix):
+def preload_faiss_from_existing_s3(s3_prefix: str, force_reload: bool = False):
     """
     지정된 S3 prefix 하위의 모든 FAISS 파티션을 로컬 캐시 디렉토리로 미리 다운로드합니다.
     """
@@ -60,9 +60,9 @@ def preload_faiss_from_existing_s3(s3_prefix):
         pkl_key = os.path.join(os.path.dirname(faiss_key), "index.pkl")
         
         local_dir = os.path.join(CHUNK_CACHE_DIR, dir_name)
-        
-        # 이미 로컬에 있으면 건너뜁니다.
-        if os.path.exists(local_dir):
+
+        # 로컬이 존재하지만 강제 재다운로드가 필요한 경우에도 진행
+        if os.path.exists(local_dir) and not force_reload:
             logging.info(f"이미 존재함, 건너뛰기: {local_dir}")
             continue
 
@@ -76,7 +76,8 @@ def preload_faiss_from_existing_s3(s3_prefix):
         elapsed = time.time() - start
 
         if faiss_ok and pkl_ok:
-            logging.info(f"✅ 프리로드 완료: {dir_name} ⏱️ {elapsed:.2f}초")
+            action = "재다운로드" if force_reload and os.path.exists(local_dir) else "프리로드"
+            logging.info(f"✅ {action} 완료: {dir_name} ⏱️ {elapsed:.2f}초")
         else:
             logging.warning(f"⚠️ 프리로드 실패: {dir_name}")
 
