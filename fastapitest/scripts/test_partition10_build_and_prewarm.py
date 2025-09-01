@@ -7,7 +7,6 @@ import time
 import shutil
 import logging
 import subprocess
-from datetime import datetime
 from typing import List, Optional
 
 import boto3
@@ -141,7 +140,6 @@ def select_national_dailies(driver, wait):
         driver.execute_script("arguments[0].click();", node)
         time.sleep(0.2)
     except Exception:
-        # 최후의 수단: 스킵 (다운로드는 가능하지만 결과 범위가 넓어질 수 있음)
         logging.warning("전국일간지 선택에 실패했습니다. 계속 진행합니다.")
 
 
@@ -162,6 +160,7 @@ def choose_politics_category(driver, wait):
 # Date input
 # -------------------------------
 def _ensure_date_direct_input_mode(driver) -> None:
+    """기간 입력을 '직접입력/사용자 지정' 모드로 전환 시도."""
     js = r'''
     return (function(){
       function clickNode(n){
@@ -193,7 +192,6 @@ def _ensure_date_direct_input_mode(driver) -> None:
         pass
 
 
-
 def set_date_range_with_events(driver, start_str: str, end_str: str):
     js = r'''
     (function(){
@@ -213,7 +211,6 @@ def set_date_range_with_events(driver, start_str: str, end_str: str):
     })();
     '''
     driver.execute_script(js, start_str, end_str)
-
 
 
 def set_date_range_robust(driver, start_str: str, end_str: str, retries: int = 3) -> None:
@@ -243,29 +240,28 @@ def set_date_range_robust(driver, start_str: str, end_str: str, retries: int = 3
     _open_step_panel(driver, "collapse-step-1")
     _ensure_date_direct_input_mode(driver)
 
-
     for attempt in range(1, retries + 1):
         # A. JS 주입 + 이벤트
         try:
             js = r'''
             (function(s,e){
-            function setVal(id, val){
+              function setVal(id, val){
                 var el = document.getElementById(id);
                 if(!el) return false;
                 try { el.removeAttribute('readonly'); } catch(_){}
                 el.value = val;
                 if (window.jQuery){
-                try { window.jQuery(el).val(val).trigger('input').trigger('change'); } catch(_){}
+                  try { window.jQuery(el).val(val).trigger('input').trigger('change'); } catch(_){}
                 }
                 el.dispatchEvent(new Event('input', {bubbles:true}));
                 el.dispatchEvent(new Event('change', {bubbles:true}));
                 return true;
-            }
-            var ok1 = setVal('search-begin-date', s);
-            var ok2 = setVal('search-end-date', e);
-            document.activeElement && document.activeElement.blur && document.activeElement.blur();
-            document.body && document.body.click && document.body.click();
-            return ok1 && ok2;
+              }
+              var ok1 = setVal('search-begin-date', s);
+              var ok2 = setVal('search-end-date', e);
+              document.activeElement && document.activeElement.blur && document.activeElement.blur();
+              document.body && document.body.click && document.body.click();
+              return ok1 && ok2;
             })(arguments[0], arguments[1]);
             '''
             driver.execute_script(js, start_str, end_str)
@@ -335,7 +331,7 @@ def apply_analysis_article_filter(driver, wait, max_retry: int = 3) -> bool:
             # 2) 체크 상태 강제 + 이벤트 트리거
             is_checked = driver.execute_script("return !!document.getElementById('filter-tm-use')?.checked;")
             if not is_checked:
-                js_force = """
+                js_force = r'''
                 (function(){
                   var el = document.getElementById('filter-tm-use');
                   if(!el) return false;
@@ -345,7 +341,7 @@ def apply_analysis_article_filter(driver, wait, max_retry: int = 3) -> bool:
                   el.dispatchEvent(new Event('change', {bubbles:true}));
                   return el.checked === true;
                 })();
-                """
+                '''
                 is_checked = driver.execute_script(js_force)
                 time.sleep(0.2)
 
@@ -418,6 +414,93 @@ def apply_analysis_article_filter(driver, wait, max_retry: int = 3) -> bool:
 
 
 # -------------------------------
+# Overlays & Search button
+# -------------------------------
+def _is_visible(driver, el) -> bool:
+    try:
+        if not el.is_displayed():
+            return False
+        rect = driver.execute_script(
+            "var r=arguments[0].getBoundingClientRect(); return [r.width,r.height];", el
+        )
+        return (rect[0] > 0 and rect[1] > 0)
+    except Exception:
+        return False
+
+
+def _dismiss_common_overlays(driver):
+    """쿠키/모달/레이어 팝업 닫기 시도."""
+    try:
+        texts = ["확인", "동의", "동의합니다", "닫기", "오늘 그만 보기", "X", "닫  기"]
+        candidates = driver.find_elements(
+            By.XPATH,
+            "//*[contains(@class,'modal') or contains(@class,'layer') or contains(@class,'popup') or contains(@class,'overlay') or contains(@class,'dim')]//button|//a"
+        )
+        for btn in candidates:
+            label = (btn.text or "").strip()
+            if any(t in label for t in texts):
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                    driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def click_search_button(driver, wait, max_retry: int = 2):
+    """
+    BigKinds 페이지에서 '검색하기'를 확실히 누른다.
+    - 오버레이/쿠키 팝업 닫기
+    - 다중 셀렉터 탐색
+    - JS 클릭 폴백
+    """
+    _dismiss_common_overlays(driver)
+
+    selectors = [
+        (By.CSS_SELECTOR, "button.news-report-search-btn"),
+        (By.CSS_SELECTOR, "button.news-search-btn"),
+        (By.CSS_SELECTOR, "button.btn-search"),
+        (By.XPATH, "//button[contains(normalize-space(.),'검색하기')]"),
+        (By.XPATH, "//a[contains(normalize-space(.),'검색하기')]"),
+        (By.XPATH, "//button[contains(.,'검색')]"),
+        (By.XPATH, "//a.contains(.,'검색')]"),
+        (By.CSS_SELECTOR, "button[class*='search']"),
+    ]
+
+    for attempt in range(1, max_retry + 1):
+        _dismiss_common_overlays(driver)
+        for by, sel in selectors:
+            try:
+                el = wait.until(EC.presence_of_element_located((by, sel)))
+                if not _is_visible(driver, el):
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                    time.sleep(0.1)
+                try:
+                    el = wait.until(EC.element_to_be_clickable((by, sel)))
+                    ActionChains(driver).move_to_element(el).pause(0.05).click().perform()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", el)
+                time.sleep(0.3)
+                return True
+            except Exception:
+                continue
+
+        # 엔터키 폴백
+        try:
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ENTER)
+            time.sleep(0.3)
+            return True
+        except Exception:
+            pass
+
+        time.sleep(0.4)
+
+    raise TimeoutException("검색 버튼을 찾거나 클릭하지 못했습니다.")
+
+
+# -------------------------------
 # Driver setup
 # -------------------------------
 def setup_driver(download_dir: str, headless: bool) -> tuple[webdriver.Chrome, WebDriverWait]:
@@ -434,13 +517,15 @@ def setup_driver(download_dir: str, headless: bool) -> tuple[webdriver.Chrome, W
     # 잡음 로그 억제 (DEPRECATED_ENDPOINT 등)
     opts.add_experimental_option("excludeSwitches", ["enable-logging"])
     opts.add_argument("--log-level=3")
+    opts.add_argument("--window-size=1400,900")
+    # 데스크톱 UA 고정(헤드리스 모바일 레이아웃 회피)
+    opts.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
     if headless:
         opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1400,900")
 
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=opts)
@@ -449,7 +534,7 @@ def setup_driver(download_dir: str, headless: bool) -> tuple[webdriver.Chrome, W
 
 
 # -------------------------------
-# BigKinds flow (merged & hardened)
+# BigKinds flow
 # -------------------------------
 def download_bigkinds_range(user_id: str, user_pw: str, start_date: str, end_date: str, download_dir: str, headless: bool = True) -> str:
     """지정 날짜 범위(YYYY-MM-DD ~ YYYY-MM-DD)로 BigKinds 엑셀 다운로드."""
@@ -483,9 +568,7 @@ def download_bigkinds_range(user_id: str, user_pw: str, start_date: str, end_dat
         time.sleep(0.6)
 
         # 6) 검색 적용 (검색하기)
-        search_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button.btn.btn-search.news-search-btn.news-report-search-btn')))
-        _scroll_into_view(driver, search_btn)
-        ActionChains(driver).move_to_element(search_btn).click().perform()
+        click_search_button(driver, wait)
         time.sleep(3)
 
         # 7) 분석기사 체크 → '적용하기'까지
@@ -579,7 +662,7 @@ def build_and_upload_partition10(df: pd.DataFrame, embeddings: OpenAIEmbeddings,
     # 업로드 순서: pkl → faiss
     if os.path.exists(os.path.join(work_dir, "index.pkl")) and os.path.exists(os.path.join(work_dir, "index.faiss")):
         for name in ("index.pkl", "index.faiss"):
-            s3.upload_file(os.path.join(work_dir, name), bucket, f"{s3_part_prefix}/{name}")
+            boto3.client("s3").upload_file(os.path.join(work_dir, name), bucket, f"{s3_part_prefix}/{name}")
         logging.info(f"업로드 완료: s3://{bucket}/{s3_part_prefix}/ (pkl→faiss)")
     else:
         logging.warning("업로드할 인덱스 파일이 없습니다.")
@@ -623,7 +706,7 @@ def main():
 
     # 고정 테스트 기간(환경변수로도 오버라이드 가능)
     start_date = os.environ.get("TEST_START_DATE", "2025-08-26")
-    end_date = os.environ.get("TEST_END_DATE", "2025-09-01")  # 최신 포함해서 테스트하면 좋음
+    end_date = os.environ.get("TEST_END_DATE", "2025-09-01")
 
     # 필수 환경 변수
     user_id = os.environ.get("BIGKINDS_USER_ID")
@@ -664,11 +747,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-    
