@@ -457,7 +457,7 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                 if line.strip() and not line.strip().startswith(('```json', '```', '[', ']'))
             ]
 
-        claims_to_check = claims_to_check[:MAX_CLAIMS_TO_FACT_CHECK]
+        # 모든 주장을 그대로 팩트체크 대상으로 사용 (상한 제거)
         logging.info(f"✂️ 중복 제거 후 최종 팩트체크 대상 주장 {len(claims_to_check)}개: {claims_to_check}")
 
         if not claims_to_check:
@@ -701,15 +701,11 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         for output in outputs:
             confidence = output['confidence_score']
             evidence_count = len(output.get('evidence', []))
-            
-            # insufficient_evidence 보정 (0% 대신 최소값 적용)
-            if confidence == 0 and evidence_count == 0:
-                confidence = 10  # 최소값
-            
-            # 가중치 계산: 증거 개수 + 신뢰도 기반
+
+            # Strict B: 신뢰도 가중 하한 제거, 상한 3.0 적용. 0% 보정 삭제.
             evidence_weight = min(evidence_count + 1, 5)  # 증거 0개=1, 1개=2, ..., 최대 5
-            confidence_weight = max(confidence / 20, 0.5)  # 신뢰도 20% 이상=1.0, 10%=0.5, 최소 0.5
-            
+            confidence_weight = min(confidence / 20, 3.0)  # 0.0 ~ 3.0
+
             weight = evidence_weight * confidence_weight
             total_weighted_score += confidence * weight
             total_weight += weight
@@ -721,7 +717,8 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             avg_score = 0
             
         evidence_ratio = sum(1 for o in outputs if o["result"] == "likely_true") / len(outputs)
-        summary = f"증거 확보된 주장 비율: {evidence_ratio*100:.1f}%" if len(outputs) >= 3 else f"신뢰도 평가 불가 (팩트체크 주장 수 부족: {len(outputs)}개)"
+        # 주장 수와 무관하게 항상 비율을 표시
+        summary = f"증거 확보된 주장 비율: {evidence_ratio*100:.1f}%"
     else:
         avg_score = 0
         summary = "결과 없음"
