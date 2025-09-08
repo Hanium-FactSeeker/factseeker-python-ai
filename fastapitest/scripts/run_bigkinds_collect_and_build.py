@@ -179,19 +179,36 @@ def build_and_upload_month_partition(
         docs.append(Document(page_content=title, metadata={"url": url}))
         used_urls.append(url)
 
-    if db and docs:
-        new_db = FAISS.from_documents(docs, embedding_model)
-        db.merge_from(new_db)
-        db.save_local(work_dir)
-    elif not db and docs:
-        db = FAISS.from_documents(docs, embedding_model)
-        db.save_local(work_dir)
-    elif not db and not docs:
-        raise ValueError("기존 인덱스도 없고 추가할 문서도 없습니다.")
+    # 임베딩/FAISS 단계에서 쿼터 초과 등으로 예외가 발생하더라도 종료하지 않도록 보호
+    try:
+        if db and docs:
+            new_db = FAISS.from_documents(docs, embedding_model)
+            db.merge_from(new_db)
+            db.save_local(work_dir)
+        elif not db and docs:
+            db = FAISS.from_documents(docs, embedding_model)
+            db.save_local(work_dir)
+        elif not db and not docs:
+            # 기존 인덱스도 없고 추가 문서도 없으면 업로드할 것이 없으므로 종료(비쿼터 사유)
+            raise ValueError("기존 인덱스도 없고 추가할 문서도 없습니다.")
+    except Exception as e:
+        msg = str(e).lower()
+        if any(k in msg for k in ("insufficient_quota", "quota", "rate limit", "429")):
+            logging.error(f"OpenAI 임베딩/FAISS 처리 중 쿼터 또는 레이트리밋 오류: {e}")
+        else:
+            logging.error(f"임베딩/FAISS 처리 중 오류: {e}")
+        # 작업 디렉터리 정리 후 업로드 단계는 건너뛰되, 프로그램은 계속 진행
+        shutil.rmtree(work_dir, ignore_errors=True)
+        return part_name, used_urls
 
     # 4) 업로드 순서: pkl -> faiss
     for name in ("index.pkl", "index.faiss"):
-        s3_client.upload_file(os.path.join(work_dir, name), bucket, f"{s3_part_prefix}/{name}")
+        try:
+            s3_client.upload_file(os.path.join(work_dir, name), bucket, f"{s3_part_prefix}/{name}")
+        except Exception as e:
+            logging.error(f"S3 업로드 실패(계속 진행): {name} -> s3://{bucket}/{s3_part_prefix}/{name} : {e}")
+            # 업로드 중단하되 전체 종료는 하지 않음
+            break
 
     shutil.rmtree(work_dir, ignore_errors=True)
     return part_name, used_urls

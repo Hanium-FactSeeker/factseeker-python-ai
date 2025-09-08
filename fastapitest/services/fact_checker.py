@@ -50,6 +50,32 @@ MAX_EVIDENCES_PER_CLAIM = int(os.environ.get("MAX_EVIDENCES_PER_CLAIM", "10"))
 PARTITION_STOP_HITS = int(os.environ.get("PARTITION_STOP_HITS", "1"))
 # --- 설정값 끝 ---
 
+# --- LLM 거절(정책상) 응답 감지 유틸 ---
+_POLICY_REFUSAL_PATTERNS = [
+    r"sorry[, ]?i can['’]t",  # sorry I can't
+    r"i cannot (?:help|assist) with that request",
+    r"cannot (?:help|assist) with that",
+    r"not able to (?:help|assist) with that",
+    r"as an ai,? i (?:cannot|can't)",
+    r"i (?:cannot|can't) comply with that",
+    r"policy (?:restricts|prevents) me",
+    # Korean variants
+    r"도와드릴 수 없습니다",
+    r"지원해 드릴 수 없",
+    r"요청(?:을)? 수행할 수 없",
+    r"정책상 (?:제공|지원|응답)할 수 없",
+]
+
+def _is_policy_refusal(text: str) -> bool:
+    if not text:
+        return False
+    import re as _re
+    low = text.strip().lower()
+    for pat in _POLICY_REFUSAL_PATTERNS:
+        if _re.search(pat, low):
+            return True
+    return False
+
 try:
     s3 = boto3.client('s3')
 except Exception as e:
@@ -431,7 +457,12 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
         extractor = build_claim_extractor()
         result = await extractor.ainvoke({"transcript": transcript})
-        claims = [line.strip() for line in result.content.strip().split('\n') if line.strip()]
+        raw_extract = (result.content or "").strip()
+        if _is_policy_refusal(raw_extract):
+            # 추출 단계에서 정책상 거절이 발생한 경우: 안내 문구를 단일 주장으로 표시
+            claims = ["AI 정책상 넘어갑니다."]
+        else:
+            claims = [line.strip() for line in raw_extract.split('\n') if line.strip()]
 
         if not claims:
             return {
@@ -476,13 +507,17 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
 
         url_set = set()  # 같은 URL에서 중복 증거 방지
         validated_evidence = []
+        policy_skipped_count = 0
         fact_checker = build_factcheck_chain()
 
         # 개별 팩트체크 함수 (이전 방식으로 복원)
         async def factcheck_doc(doc):
             try:
                 check_result = await fact_checker.ainvoke({"claim": claim, "context": doc.page_content})
-                result_content = check_result.content
+                result_content = check_result.content or ""
+                # 정책상 거절 응답 감지 → 사용자 공지용 플래그 반환
+                if _is_policy_refusal(result_content):
+                    return {"policy_skipped": True, "policy_notice": "AI 정책상 넘어갑니다."}
                 relevance = re.search(r"관련성: (.+)", result_content)
                 fact_check_result_match = re.search(r"사실 설명 여부: (.+)", result_content)
                 justification = re.search(r"간단한 설명: (.+)", result_content)
@@ -530,6 +565,10 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
             factcheck_results = await asyncio.gather(*factcheck_tasks)
             for res in factcheck_results:
                 if res and isinstance(res, dict):  # None이 아니고 dict 타입인지 확인
+                    if res.get("policy_skipped"):
+                        policy_skipped_count += 1
+                        logging.info(f"⛔ 정책상 스킵됨: '{claim}'")
+                        continue
                     validated_evidence.append(res)
                     logging.info(f"✅ [네이버] 주장 '{claim}' → 증거 URL: {res.get('url', 'N/A')}")
                     if len(validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
@@ -566,6 +605,10 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                     factcheck_results = await asyncio.gather(*factcheck_tasks)
                     for res in factcheck_results:
                         if res and isinstance(res, dict):  # None이 아니고 dict 타입인지 확인
+                            if res.get("policy_skipped"):
+                                policy_skipped_count += 1
+                                logging.info(f"⛔ 정책상 스킵됨: '{claim}' [Google CSE]")
+                                continue
                             google_validated_evidence.append(res)
                             logging.info(f"✅ [Google CSE] 주장 '{claim}' → 증거 URL: {res.get('url', 'N/A')}")
                             if len(google_validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
@@ -624,6 +667,10 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
                         factcheck_results = await asyncio.gather(*factcheck_tasks)
                         for res in factcheck_results:
                             if res and isinstance(res, dict):
+                                if res.get("policy_skipped"):
+                                    policy_skipped_count += 1
+                                    logging.info(f"⛔ 정책상 스킵됨: '{claim}' [파티션9]")
+                                    continue
                                 partition_9_validated_evidence.append(res)
                                 logging.info(f"✅ [파티션9] 주장 '{claim}' → 증거 URL: {res.get('url', 'N/A')}")
                                 if len(partition_9_validated_evidence) >= MAX_EVIDENCES_PER_CLAIM:
@@ -655,12 +702,14 @@ async def run_fact_check(youtube_url, faiss_partition_dirs):
         # 증거 전처리 적용
         cleaned_evidence = clean_evidence_json(final_evidence[:3])
         
-        return {
-            "claim": claim,
+        claim_out = f"{claim} (AI 정책상 넘어갑니다.)" if policy_skipped_count > 0 else claim
+        result_obj = {
+            "claim": claim_out,
             "result": "likely_true" if final_evidence else "insufficient_evidence",
             "confidence_score": final_confidence,
             "evidence": cleaned_evidence
         }
+        return result_obj
 
     # 주장 단위 동시성 제한 (최대 3개 동시 처리)
     claim_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CLAIMS)
