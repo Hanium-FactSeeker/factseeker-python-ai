@@ -594,7 +594,7 @@ def fetch_youtube_transcript(video_url: str) -> str:
         logging.error(f"OpenAI 클라이언트 초기화 오류: {e}")
         return ""
 
-    cookies_path = "/home/ubuntu/factseeker-python-ai/fastapitest/cookies.txt"
+    cookies_path = "/home/ubuntu/factseeker-python-ai/youtube_verification/cookies.txt"
     outtmpl = f"{vid}.%(ext)s"
     downloaded_paths: list[str] = []
 

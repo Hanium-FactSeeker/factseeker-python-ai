@@ -7,8 +7,8 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# fastapitest 폴더 안의 앱 코드만 복사
-COPY fastapitest/ /app/
+# youtube_verification 폴더 안의 앱 코드만 복사
+COPY youtube_verification/ /app/
 
 RUN pip install --upgrade pip \
   && pip install --no-cache-dir \

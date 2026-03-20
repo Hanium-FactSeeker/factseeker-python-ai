@@ -660,7 +660,7 @@ def bigkinds_login_and_download(
 
 def _trigger_prewarm_after_upload(urls: List[str], concurrency: int = 3, limit: int = 0) -> int:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    cmd = [os.sys.executable, "-m", "fastapitest.scripts.prewarm_articles"]
+    cmd = [os.sys.executable, "-m", "youtube_verification.scripts.prewarm_articles"]
     # 파일 모드로 URL 전달(제목 프리로드 중복 방지)
     tmp_dir = os.path.join(repo_root, ".tmp")
     os.makedirs(tmp_dir, exist_ok=True)
@@ -709,7 +709,7 @@ def main():
             os.makedirs(logs_dir, exist_ok=True)
             ts = time.strftime("%Y%m%d-%H%M%S")
             log_path = os.path.join(logs_dir, f"run_bigkinds_{ts}.log")
-            cmd = [sys.executable, "-m", "fastapitest.scripts.run_bigkinds_collect_and_build"]
+            cmd = [sys.executable, "-m", "youtube_verification.scripts.run_bigkinds_collect_and_build"]
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
             env["RUN_BIGKINDS_DETACHED"] = "1"

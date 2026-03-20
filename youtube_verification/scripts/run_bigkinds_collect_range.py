@@ -9,7 +9,7 @@ import pandas as pd
 from langchain_openai import OpenAIEmbeddings
 
 # 내부 유틸은 기존 스크립트에서 재사용
-from fastapitest.scripts.run_bigkinds_collect_and_build import (
+from youtube_verification.scripts.run_bigkinds_collect_and_build import (
     setup_driver,
     wait_for_download_complete,
     move_to_data_folder,
@@ -173,7 +173,7 @@ def main():
     if args.prewarm:
         try:
             # 내부 함수를 늦은 바인딩으로 가져와 호출 (순환 import 회피)
-            from fastapitest.scripts.run_bigkinds_collect_and_build import _trigger_prewarm_after_upload
+            from youtube_verification.scripts.run_bigkinds_collect_and_build import _trigger_prewarm_after_upload
             rc = _trigger_prewarm_after_upload(
                 urls=used_urls,
                 concurrency=args.prewarm_concurrency,

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import boto3
 from botocore.exceptions import ClientError
 
-from fastapitest.core.preload_s3_faiss import (
+from youtube_verification.core.preload_s3_faiss import (
     preload_faiss_from_existing_s3,
     CHUNK_CACHE_DIR,
 )

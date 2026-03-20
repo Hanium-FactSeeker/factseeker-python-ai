@@ -65,7 +65,7 @@ def _run_prewarm(prefix: str, concurrency: int, limit: int) -> int:
     cmd = [
         sys.executable,
         "-m",
-        "fastapitest.scripts.prewarm_articles",
+        "youtube_verification.scripts.prewarm_articles",
         "--source",
         "partitions",
         "--prefix",
